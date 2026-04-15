@@ -4,7 +4,6 @@ const qrcode = require('qrcode-terminal');
 const { GoogleGenAI } = require('@google/genai');
 const crypto = require('crypto');
 const config = require('./config');
-const ExcelService = require('./excelService');
 const { parseMessage } = require('./messageParser');
 const supabaseService = require('./supabaseService');
 const { fuzzyMatch } = require('./utils');
@@ -16,7 +15,6 @@ const groupNameCache = {};
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
-    const excelService = new ExcelService(config.EXCEL_FILE_PATH);
 
     const { version, isLatest } = await fetchLatestBaileysVersion();
     console.log(`Using WA v${version.join('.')}, isLatest: ${isLatest}`);
