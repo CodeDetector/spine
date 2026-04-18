@@ -7,6 +7,7 @@ const paymentTemplate = fs.readFileSync(path.join(__dirname, 'payment_extraction
 const visitTemplate = fs.readFileSync(path.join(__dirname, 'visit_extraction.md'), 'utf-8');
 const managerSummaryTemplate = fs.readFileSync(path.join(__dirname, '.', 'reports', 'managerScreeningReport.md'), 'utf-8');
 const employeeSummaryTemplate = fs.readFileSync(path.join(__dirname, '.', 'reports', 'employeeScreeningReport.md'), 'utf-8');
+const graphTemplate = fs.readFileSync(path.join(__dirname, 'graph_extraction.md'), 'utf-8');
 
 const screeningPrompt = (messageText) => {
     return screeningTemplate.replace(/{{messageText}}/g, messageText);
@@ -47,11 +48,16 @@ const employeeScreeningReportPrompt = (employeeData, messagesText) => {
         .replace(/{{reportDate}}/g, reportDate);
 };
 
+const graphExtractionPrompt = (messageText) => {
+    return graphTemplate.replace(/{{messageText}}/g, messageText);
+};
+
 module.exports = {
     screeningPrompt,
     leaveExtractionPrompt,
     paymentExtractionPrompt,
     visitExtractionPrompt,
     managerScreeningReportPrompt,
-    employeeScreeningReportPrompt
+    employeeScreeningReportPrompt,
+    graphExtractionPrompt
 };

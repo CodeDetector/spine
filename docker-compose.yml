@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  omni-whatsapp:
+    build: .
+    container_name: omni-whatsapp
+    command: node start-whatsapp.js
+    volumes:
+      - ./.env:/app/.env
+      - ./auth_info_baileys:/app/auth_info_baileys
+      - ./gmail-tokens.json:/app/gmail-tokens.json
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  omni-gmail:
+    build: .
+    container_name: omni-gmail
+    command: node start-gmail.js
+    volumes:
+      - ./.env:/app/.env
+      - ./gmail-tokens.json:/app/gmail-tokens.json
+    restart: unless-stopped
+    depends_on:
+      - omni-whatsapp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  omni-dashboard:
+    build: .
+    container_name: omni-dashboard
+    command: node server.js
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./.env:/app/.env
+    restart: unless-stopped

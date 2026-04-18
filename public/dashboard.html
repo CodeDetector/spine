@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omni-Brain | Intelligence Layer</title>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.26.0/dist/cytoscape.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        :root {
+            --bg-deep: #0a0e14;
+            --bg-card: rgba(255, 255, 255, 0.05);
+            --accent: #4cc9f0;
+            --accent-glow: rgba(76, 201, 240, 0.4);
+            --text-main: #e0e6ed;
+            --text-dim: #94a3b8;
+            --error: #ff4d6d;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, sans-serif;
+            background-color: var(--bg-deep);
+            color: var(--text-main);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 20px 40px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: rgba(10, 14, 20, 0.8);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 100;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: 800;
+            letter-spacing: -1px;
+            background: linear-gradient(90deg, #4cc9f0, #4361ee);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .status-badge {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            background: rgba(0, 255, 127, 0.1);
+            color: #00ff7f;
+            border: 1px solid rgba(0, 255, 127, 0.2);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.6; }
+            50% { opacity: 1; }
+            100% { opacity: 0.6; }
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            position: relative;
+        }
+
+        #cy {
+            flex: 1;
+            background-color: #0a0e14;
+        }
+
+        .sidebar {
+            width: 350px;
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(15px);
+            border-left: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 12px;
+            padding: 16px;
+        }
+
+        .card h3 {
+            margin: 0 0 12px 0;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+        }
+
+        .insight-item {
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 13px;
+        }
+
+        .insight-item:last-child {
+            border-bottom: none;
+        }
+
+        .node-info-panel {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            width: 300px;
+            z-index: 50;
+            display: none;
+        }
+
+        .controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            gap: 10px;
+            z-index: 50;
+        }
+
+        button {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        button:hover {
+            background: var(--accent);
+            color: var(--bg-deep);
+            border-color: var(--accent);
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <div class="logo">OMNI-BRAIN // INTELLIGENCE</div>
+    <div class="status-badge">Live Intelligence Feed</div>
+</header>
+
+<main>
+    <div class="controls">
+        <button onclick="refreshData()">🚀 Refresh Graph</button>
+        <button onclick="cy.layout({ name: 'cose', animate: true }).run()">🌀 Auto Layout</button>
+    </div>
+
+    <div id="cy"></div>
+
+    <div class="node-info-panel card" id="nodePanel">
+        <h3 id="panelTitle">Node Details</h3>
+        <div id="panelContent" style="font-size: 13px; color: var(--text-dim);"></div>
+    </div>
+
+    <div class="sidebar">
+        <div class="card">
+            <h3>System Stats</h3>
+            <div id="stats" style="font-size: 24px; font-weight: 700; color: var(--accent);">
+                0 Nodes • 0 Edges
+            </div>
+        </div>
+        
+        <div class="card">
+            <h3>Recent Intelligence</h3>
+            <div id="feed">
+                <div class="insight-item">Waiting for data...</div>
+            </div>
+        </div>
+        
+        <div class="card" style="background: rgba(255, 77, 109, 0.05); border-color: rgba(255, 77, 109, 0.2);">
+            <h3 style="color: var(--error);">Critical Alerts</h3>
+            <div id="alerts" style="font-size: 13px;">
+                Searching for orphan promises...
+            </div>
+        </div>
+    </div>
+</main>
+
+<script>
+    let cy;
+    let sbClient;
+
+    async function init() {
+        const response = await fetch('/api/config');
+        const config = await response.json();
+        
+        // Destructure createClient from the global supabase object
+        const { createClient } = supabase;
+        sbClient = createClient(config.supabaseUrl, config.supabaseKey);
+        
+        cy = cytoscape({
+            container: document.getElementById('cy'),
+            style: [
+                {
+                    selector: 'node',
+                    style: {
+                        'label': 'data(name)',
+                        'color': '#fff',
+                        'background-color': '#4361ee',
+                        'text-valign': 'bottom',
+                        'text-margin-y': 8,
+                        'font-size': '10px',
+                        'width': 25,
+                        'height': 25,
+                        'border-width': 2,
+                        'border-color': '#4cc9f0',
+                        'transition-property': 'background-color, line-color, target-arrow-color',
+                        'transition-duration': '0.5s'
+                    }
+                },
+                {
+                    selector: 'node[type="Employee"]',
+                    style: { 'background-color': '#4cc9f0', 'width': 35, 'height': 35 }
+                },
+                {
+                    selector: 'node[type="Client"]',
+                    style: { 'background-color': '#f72585' }
+                },
+                {
+                    selector: 'node[type="Product"]',
+                    style: { 'background-color': '#ff9f1c', 'shape': 'diamond' }
+                },
+                {
+                    selector: 'edge',
+                    style: {
+                        'width': 2,
+                        'line-color': 'rgba(255,255,255,0.15)',
+                        'target-arrow-color': 'rgba(255,255,255,0.15)',
+                        'target-arrow-shape': 'triangle',
+                        'curve-style': 'bezier',
+                        'label': 'data(type)',
+                        'font-size': '8px',
+                        'color': '#94a3b8',
+                        'text-rotation': 'autorotate',
+                        'text-margin-y': -10
+                    }
+                },
+                {
+                    selector: 'edge[type="PROMISED"]',
+                    style: { 'line-color': '#ff9e00', 'width': 3, 'line-style': 'dashed' }
+                }
+            ],
+            layout: { name: 'cose', animate: true }
+        });
+
+        cy.on('tap', 'node', function(evt) {
+            const node = evt.target;
+            const data = node.data();
+            document.getElementById('nodePanel').style.display = 'block';
+            document.getElementById('panelTitle').innerText = data.type + ': ' + data.name;
+            document.getElementById('panelContent').innerText = JSON.stringify(data.properties, null, 2);
+        });
+
+        await refreshData();
+        setInterval(refreshData, 30000); // Live sync every 30s
+    }
+
+    async function refreshData() {
+        if (!sbClient) return;
+        const { data: nodes } = await sbClient.from('nodes').select('*');
+        const { data: edges } = await sbClient.from('edges').select('*');
+
+        const elements = [
+            ...nodes.map(n => ({ data: { id: n.id, name: n.name, type: n.type, properties: n.properties } })),
+            ...edges.map(e => ({ data: { source: e.from_node_id, target: e.to_node_id, id: e.id, type: e.relationship_type, properties: e.properties } }))
+        ];
+
+        cy.json({ elements });
+        cy.layout({ name: 'cose', animate: true, fit: true }).run();
+
+        document.getElementById('stats').innerText = `${nodes.length} Nodes • ${edges.length} Edges`;
+        
+        // Update Feed
+        const feed = document.getElementById('feed');
+        feed.innerHTML = edges.slice(-5).reverse().map(e => `
+            <div class="insight-item">
+                <span style="color:var(--accent)">${e.relationship_type}</span> detected between nodes.
+            </div>
+        `).join('') || '<div class="insight-item">Analyzing communications...</div>';
+
+        // Check for SLA / Orphan Promises (Rule: PROMISED without COMPLETED in history)
+        const orphanCount = edges.filter(e => e.relationship_type === 'PROMISED').length;
+        document.getElementById('alerts').innerText = `📊 ${orphanCount} active commitments found under tracking.`;
+    }
+
+    init();
+</script>
+</body>
+</html>

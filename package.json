@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node index.js",
+    "gmail-setup": "node feeder-email/setup.js",
+    "dashboard": "node server.js",
+    "sla-report": "node conversationTracker.js"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +19,8 @@
     "@supabase/supabase-js": "^2.103.0",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "googleapis": "^171.4.0",
     "node-cron": "^4.2.1",
     "pino": "^10.3.1",
     "qrcode-terminal": "^0.12.0",

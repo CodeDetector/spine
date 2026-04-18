@@ -18,15 +18,22 @@ class SupabaseService {
     async getEmployeeId(sender) {
         if (!this.client) return null;
         try {
-            // Try matching against 'contact' (real number) or 'Mobile'
-            const { data, error } = await this.client
-                .from('employees')
-                .select('id')
+            let query = this.client.from('employees').select('id');
+
+            // If it's an email, only check the emailId column to avoid bigint errors
+            if (sender.includes('@')) {
+                const { data, error } = await query.eq('emailId', sender).single();
+                if (error) return null;
+                return data.id;
+            } 
+            
+            // If it's a number (for WhatsApp), check contact and Mobile
+            const { data, error } = await query
                 .or(`contact.eq.${sender},Mobile.eq.${sender}`)
                 .single();
 
             if (error) {
-                console.warn(`⚠️ Could not find employee with number ${sender}: ${error.message}`);
+                console.warn(`⚠️ Could not find employee with number/email ${sender}: ${error.message}`);
                 return null;
             }
             return data.id;
@@ -89,6 +96,122 @@ class SupabaseService {
             }
         } catch (err) {
             console.error('❌ sendtoDatabase failed:', err.message);
+        }
+    }
+
+    async getIdByEmail(email, table) {
+        if (!this.client || !email) return null;
+        try {
+            const { data, error } = await this.client
+                .from(table)
+                .select('id')
+                .eq('emailId', email)
+                .single();
+            if (error) return null;
+            return data.id;
+        } catch (err) {
+            return null;
+        }
+    }
+
+    async logEmailToDatabase(emailData) {
+        if (!this.client) return;
+        try {
+            // Check if hash already exists to prevent duplicates
+            if (emailData.hash) {
+                const { data: existing } = await this.client
+                    .from('emails')
+                    .select('id')
+                    .eq('hash', emailData.hash)
+                    .maybeSingle();
+                
+                if (existing) {
+                    console.log(`⏭️ Email with hash ${emailData.hash.substring(0, 10)}... already exists. Skipping.`);
+                    return;
+                }
+            }
+
+            const { error } = await this.client
+                .from('emails')
+                .insert([{
+                    sender: emailData.sender,
+                    receiver: emailData.receiver,
+                    message: emailData.message,
+                    employeeId: emailData.employeeId,
+                    oppositionId: emailData.oppositionId || null,
+                    mediaHash: emailData.mediaHash || null,
+                    mediaUrl: emailData.mediaUrl || null,
+                    hash: emailData.hash || null,
+                    threadId: emailData.threadId || null
+                }]);
+
+            if (error) {
+                console.error('❌ Error inserting into Supabase emails table:', error.message);
+            } else {
+                console.log(`✅ Email successfully logged to Supabase emails table.`);
+            }
+        } catch (err) {
+            console.error('❌ logEmailToDatabase failed:', err.message);
+        }
+    }
+
+    async getPendingReplies() {
+        if (!this.client) return [];
+        try {
+            // Fetch recent emails to analyze conversations
+            const { data, error } = await this.client
+                .from('emails')
+                .select(`
+                    id, 
+                    created_at, 
+                    sender, 
+                    receiver, 
+                    threadId, 
+                    employeeId, 
+                    oppositionId,
+                    employees (Name, Mobile, contact, emailId)
+                `)
+                .order('created_at', { ascending: false })
+                .limit(200);
+
+            if (error) throw error;
+
+            const conversations = {};
+            data.forEach(email => {
+                const tid = email.threadId || `no-thread-${email.sender}-${email.receiver}`;
+                if (!conversations[tid]) {
+                    conversations[tid] = {
+                        messages: [],
+                        lastMessage: email,
+                        employee: email.employees?.Name || 'Unknown',
+                        phone: email.employees?.Mobile || email.employees?.contact
+                    };
+                }
+                conversations[tid].messages.push(email);
+            });
+
+            const pending = [];
+            for (const tid in conversations) {
+                const last = conversations[tid].lastMessage;
+                const emp = last.employees;
+
+                if (emp && last.sender.toLowerCase().trim() !== emp.emailId.toLowerCase().trim()) {
+                    const waitTimeMs = new Date() - new Date(last.created_at);
+                    const waitTimeMinutes = Math.floor(waitTimeMs / (1000 * 60));
+                    
+                    pending.push({
+                        threadId: tid,
+                        client: last.sender,
+                        employeeInfo: emp,
+                        waitTime: waitTimeMinutes,
+                        lastMessage: last.created_at
+                    });
+                }
+            }
+            return pending;
+        } catch (err) {
+            console.error('❌ Error fetching pending replies:', err.message);
+            return [];
         }
     }
 
@@ -248,7 +371,7 @@ class SupabaseService {
         try {
             const { data, error } = await this.client
                 .from('employees')
-                .select('id, Name, Mobile, contact');
+                .select('id, Name, Mobile, contact, emailId');
 
             if (error) {
                 console.error('❌ Error fetching employees:', error.message);
@@ -326,6 +449,106 @@ class SupabaseService {
         } catch (err) {
             console.error(`❌ getEmployeesByManager failed for ${managerId}:`, err.message);
             return [];
+        }
+    }
+
+    // --- Knowledge Graph Operations ---
+
+    async upsertNode(type, name, properties = {}) {
+        if (!this.client) return null;
+        try {
+            // Find existing node by type and name
+            const { data: existing, error: findError } = await this.client
+                .from('nodes')
+                .select('id')
+                .eq('type', type)
+                .eq('name', name)
+                .maybeSingle();
+
+            if (existing) {
+                // Update properties
+                const { data: updated, error: updateError } = await this.client
+                    .from('nodes')
+                    .update({ properties: { ...existing.properties, ...properties }, updated_at: new Date() })
+                    .eq('id', existing.id)
+                    .select()
+                    .single();
+                return updated.id;
+            }
+
+            // Create new node
+            const { data: newNode, error: insertError } = await this.client
+                .from('nodes')
+                .insert([{ type, name, properties }])
+                .select()
+                .single();
+
+            if (insertError) throw insertError;
+            return newNode.id;
+        } catch (err) {
+            console.error(`❌ upsertNode failed (${type}:${name}):`, err.message);
+            return null;
+        }
+    }
+
+    // --- SECURED VAULT OPERATIONS (Supabase Vault Schema) ---
+
+    async saveEmployeeToken(employeeId, provider, tokenData) {
+        if (!this.client || provider !== 'gmail') return null;
+        try {
+            console.log(`🔐 Vault: Encrypting credentials for Employee ${employeeId}...`);
+            const { error } = await this.client.rpc('save_gmail_secret', {
+                emp_id: employeeId,
+                token_json: JSON.stringify(tokenData)
+            });
+
+            if (error) throw error;
+            console.log(`✅ Vault: Secret locked for Employee ${employeeId}.`);
+            return true;
+        } catch (err) {
+            console.error(`❌ Vault RPC Error:`, err.message);
+            return null;
+        }
+    }
+
+    async getAuthenticatedEmployees(provider = 'gmail') {
+        if (!this.client || provider !== 'gmail') return [];
+        try {
+            const { data, error } = await this.client.rpc('get_all_gmail_secrets');
+
+            if (error) throw error;
+            
+            // Join with employees table to get extra metadata if needed locally
+            // But for polling, we mainly need ID and Tokens
+            return data.map(record => ({
+                employee_id: record.employee_id,
+                token_data: record.token_data
+            }));
+        } catch (err) {
+            console.error(`❌ Vault Retrieval Error:`, err.message);
+            return [];
+        }
+    }
+
+    async createEdge(fromNodeId, toNodeId, relationshipType, properties = {}) {
+        if (!this.client || !fromNodeId || !toNodeId) return null;
+        try {
+            const { data, error } = await this.client
+                .from('edges')
+                .insert([{
+                    from_node_id: fromNodeId,
+                    to_node_id: toNodeId,
+                    relationship_type: relationshipType,
+                    properties
+                }])
+                .select()
+                .single();
+
+            if (error) throw error;
+            return data.id;
+        } catch (err) {
+            console.error(`❌ createEdge failed (${relationshipType}):`, err.message);
+            return null;
         }
     }
 }
