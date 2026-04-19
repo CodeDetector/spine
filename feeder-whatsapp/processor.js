@@ -220,9 +220,17 @@ async function connectToWhatsApp() {
         }
     });
 
+
+    
     cron.schedule('41 21 * * *', async () => {
         console.log('⏰ Sending daily report...');
         await generateAndSendReport(sock);
+    }, { scheduled: true, timezone: "Asia/Kolkata" });
+
+    // 🕸️ Daily Knowledge Graph Batch Update
+    cron.schedule('30 23 * * *', async () => {
+        console.log('⏰ Starting Daily Knowledge Graph Batch Update...');
+        await intelligenceService.runDailyGraphUpdate();
     }, { scheduled: true, timezone: "Asia/Kolkata" });
 }
 

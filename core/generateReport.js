@@ -36,24 +36,50 @@ async function generateAndSendReport(sock) {
             await sock.sendMessage(managerJid, { text: `📅 *Daily Team Summary Report* - ${new Date().toLocaleDateString()}\nGathering data for your team (${teamMembers.length} members) from the past 5 days...` });
 
             for (const employee of teamMembers) {
-                console.log(`  🔍 Analyzing messages for: ${employee.Name}...`);
-                const messages = await supabaseService.getMessagesByEmployeeId(employee.id, 5);
+                console.log(`  🔍 Analyzing communications for: ${employee.Name}...`);
                 
-                if (messages.length === 0) {
-                    console.log(`  ℹ️ No messages for ${employee.Name} in the last 5 days.`);
+                // 1. Fetch WhatsApp Messages
+                const waMessages = await supabaseService.getMessagesByEmployeeId(employee.id, 5);
+                
+                // 2. Fetch Emails
+                const emails = await supabaseService.getEmailsByEmployeeId(employee.id, 5);
+
+                // 3. Fetch Knowledge Graph Context
+                const kgContext = await supabaseService.getGraphContext(employee.Name);
+                
+                if (waMessages.length === 0 && emails.length === 0) {
+                    console.log(`  ℹ️ No activity for ${employee.Name} in the last 5 days.`);
                     continue;
                 }
 
-                const formattedMessages = messages.map(m => {
+                // Format Combined Communications
+                let combinedLogs = "--- WHATSAPP MESSAGES ---\n";
+                waMessages.forEach(m => {
                     const date = new Date(m.created_at).toLocaleString();
-                    return `[${date}] (${m.messageType}): ${m.description}`;
-                }).join('\n');
+                    combinedLogs += `[${date}] (${m.messageType}): ${m.description}\n`;
+                });
+
+                combinedLogs += "\n--- GMAIL COMMUNICATIONS ---\n";
+                emails.forEach(e => {
+                    const date = new Date(e.created_at).toLocaleString();
+                    combinedLogs += `[${date}] From: ${e.sender} To: ${e.receiver}\nMessage: ${e.message}\n`;
+                });
+
+                // Format Graph Context for Prompt
+                let kgText = "No specific relationships found in Knowledge Graph.";
+                if (kgContext.relationships && kgContext.relationships.length > 0) {
+                    kgText = kgContext.relationships.map(r => {
+                        const from = r.from_node?.name || "Unknown";
+                        const to = r.to_node?.name || "Unknown";
+                        return `- [${r.relationship_type}] ${from} -> ${to} (Details: ${JSON.stringify(r.properties)})`;
+                    }).join('\n');
+                }
 
                 const employeeJid = `${employee.contact}@s.whatsapp.net`;
 
                 // 1. Generate Report for Manager
                 try {
-                    const managerPrompt = managerScreeningReportPrompt(employee, formattedMessages);
+                    const managerPrompt = managerScreeningReportPrompt(employee, combinedLogs, kgText);
                     const managerResult = await genAI.models.generateContent({
                         model: model,
                         contents: [{ role: 'user', parts: [{ text: managerPrompt }] }]
@@ -71,7 +97,7 @@ async function generateAndSendReport(sock) {
 
                 // 2. Generate Supportive Hindi Report for Employee
                 try {
-                    const employeePrompt = employeeScreeningReportPrompt(employee, formattedMessages);
+                    const employeePrompt = employeeScreeningReportPrompt(employee, combinedLogs, kgText);
                     const employeeResult = await genAI.models.generateContent({
                         model: model,
                         contents: [{ role: 'user', parts: [{ text: employeePrompt }] }]

@@ -17,14 +17,15 @@
 
 *Hume aap par garv hai aur hum saath milkar aur bhi accha karenge!* 💪
 
-📌 _Yeh report aapke pichle 5 dino ke messages ke basis par tayyar ki gayi hai._
+📌 _Yeh report aapke pichle 5 dino ke WhatsApp, Email aur hamare Knowledge Graph relationships ke basis par tayyar ki gayi hai._
 
 ---
 
 *PROMPT INSTRUCTIONS for AI:*
 - Language: Hinglish (Hindi words in English script).
 - Tone: Extremely supportive, encouraging, and respectful.
-- Context: Analyzing messages for employee {{employeeName}} from the last 5 days.
+- Context: Analyzing messages and emails for employee {{employeeName}} from the last 5 days.
+- Knowledge Graph Context: {{graphContext}}
 - Format: WhatsApp friendly. Use "  - " (two spaces and a hyphen) for sub-points to create indentation.
 - NEVER use double asterisks (**) or any markdown headers (#).
-- Input Messages: {{messages}}
+- Input Content (WhatsApp & Emails): {{messages}}

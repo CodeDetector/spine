@@ -31,20 +31,22 @@ const visitExtractionPrompt = (messageText) => {
     return visitTemplate.replace(/{{messageText}}/g, messageText);
 };
 
-const managerScreeningReportPrompt = (employeeData, messagesText) => {
+const managerScreeningReportPrompt = (employeeData, messagesText, graphContext = "") => {
     const reportDate = new Date().toLocaleDateString();
     return managerSummaryTemplate
         .replace(/{{employeeName}}/g, employeeData.Name)
         .replace(/{{employeeMobile}}/g, employeeData.Mobile)
         .replace(/{{messages}}/g, messagesText)
+        .replace(/{{graphContext}}/g, graphContext)
         .replace(/{{reportDate}}/g, reportDate);
 };
 
-const employeeScreeningReportPrompt = (employeeData, messagesText) => {
+const employeeScreeningReportPrompt = (employeeData, messagesText, graphContext = "") => {
     const reportDate = new Date().toLocaleDateString();
     return employeeSummaryTemplate
         .replace(/{{employeeName}}/g, employeeData.Name)
         .replace(/{{messages}}/g, messagesText)
+        .replace(/{{graphContext}}/g, graphContext)
         .replace(/{{reportDate}}/g, reportDate);
 };
 

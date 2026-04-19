@@ -408,6 +408,30 @@ class SupabaseService {
         }
     }
 
+    async getEmailsByEmployeeId(employeeId, days = 5) {
+        if (!this.client) return [];
+        try {
+            const pastDate = new Date();
+            pastDate.setDate(pastDate.getDate() - days);
+
+            const { data, error } = await this.client
+                .from('emails')
+                .select('sender, receiver, message, created_at')
+                .eq('employeeId', employeeId)
+                .gte('created_at', pastDate.toISOString())
+                .order('created_at', { ascending: true });
+
+            if (error) {
+                console.error(`❌ Error fetching emails for employee ${employeeId}:`, error.message);
+                return [];
+            }
+            return data;
+        } catch (err) {
+            console.error('❌ getEmailsByEmployeeId failed:', err.message);
+            return [];
+        }
+    }
+
     async getManagers() {
         if (!this.client) return [];
         try {
@@ -448,6 +472,46 @@ class SupabaseService {
             return data;
         } catch (err) {
             console.error(`❌ getEmployeesByManager failed for ${managerId}:`, err.message);
+            return [];
+        }
+    }
+
+    async getDailyMessages() {
+        if (!this.client) return [];
+        try {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            
+            const { data, error } = await this.client
+                .from('messages')
+                .select('id, description, created_at, employees(Name)')
+                .gte('created_at', today.toISOString())
+                .order('created_at', { ascending: true });
+
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ getDailyMessages failed:', err.message);
+            return [];
+        }
+    }
+
+    async getDailyEmails() {
+        if (!this.client) return [];
+        try {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+
+            const { data, error } = await this.client
+                .from('emails')
+                .select('id, sender, receiver, message, created_at, employees(Name)')
+                .gte('created_at', today.toISOString())
+                .order('created_at', { ascending: true });
+
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ getDailyEmails failed:', err.message);
             return [];
         }
     }
@@ -549,6 +613,42 @@ class SupabaseService {
         } catch (err) {
             console.error(`❌ createEdge failed (${relationshipType}):`, err.message);
             return null;
+        }
+    }
+
+    async getGraphContext(employeeName) {
+        if (!this.client || !employeeName) return { nodes: [], edges: [] };
+        try {
+            // Find the employee node
+            const { data: node, error: nodeError } = await this.client
+                .from('nodes')
+                .select('id, type, name, properties')
+                .eq('name', employeeName)
+                .maybeSingle();
+
+            if (!node) return { nodes: [], edges: [] };
+
+            // Find connected edges and nodes
+            const { data: edges, error: edgeError } = await this.client
+                .from('edges')
+                .select(`
+                    id, 
+                    relationship_type, 
+                    properties,
+                    from_node:from_node_id(id, type, name, properties),
+                    to_node:to_node_id(id, type, name, properties)
+                `)
+                .or(`from_node_id.eq.${node.id},to_node_id.eq.${node.id}`);
+
+            if (edgeError) throw edgeError;
+
+            return {
+                mainNode: node,
+                relationships: edges
+            };
+        } catch (err) {
+            console.error(`❌ getGraphContext failed for ${employeeName}:`, err.message);
+            return { nodes: [], edges: [] };
         }
     }
 }
