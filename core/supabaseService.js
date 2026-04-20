@@ -195,7 +195,7 @@ class SupabaseService {
                 const last = conversations[tid].lastMessage;
                 const emp = last.employees;
 
-                if (emp && last.sender.toLowerCase().trim() !== emp.emailId.toLowerCase().trim()) {
+                if (emp && emp.emailId && last.sender && last.sender.toLowerCase().trim() !== emp.emailId.toLowerCase().trim()) {
                     const waitTimeMs = new Date() - new Date(last.created_at);
                     const waitTimeMinutes = Math.floor(waitTimeMs / (1000 * 60));
                     
@@ -572,6 +572,22 @@ class SupabaseService {
         } catch (err) {
             console.error(`❌ Vault RPC Error:`, err.message);
             return null;
+        }
+    }
+
+
+    async updateEmployeeEmail(employeeId, email) {
+        if (!this.client || !employeeId || !email) return;
+        try {
+            const { error } = await this.client
+                .from('employees')
+                .update({ emailId: email })
+                .eq('id', employeeId);
+
+            if (error) throw error;
+            console.log(`✅ Employee ${employeeId} email updated to: ${email}`);
+        } catch (err) {
+            console.error(`❌ Failed to update employee email:`, err.message);
         }
     }
 

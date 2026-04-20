@@ -52,7 +52,6 @@ class GmailService {
         const emailDetails = [];
 
         for (const msg of messages) {
-            if (lastReadId && msg.id === lastReadId) break;
             
             const detail = await gmail.users.messages.get({
                 userId: 'me',
@@ -120,6 +119,18 @@ class GmailService {
         });
 
         return Buffer.from(res.data.data, 'base64');
+    }
+
+    async getProfile(tokens) {
+        const client = this.createClient();
+        client.setCredentials(tokens);
+        const gmail = google.gmail({ version: 'v1', auth: client });
+        
+        const res = await gmail.users.getProfile({
+            userId: 'me'
+        });
+
+        return res.data;
     }
 }
 

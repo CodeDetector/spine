@@ -14,6 +14,8 @@ const gmailProcessor = require('../feeder-email/processor');
 const intelligenceService = require('../core/intelligenceService');
 
 const groupNameCache = {};
+let slaMonitorStarted = false;
+let cronJobsStarted = false;
 
 async function connectToWhatsApp() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_baileys');
@@ -26,7 +28,9 @@ async function connectToWhatsApp() {
         auth: state,
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
-        syncFullHistory: false
+        syncFullHistory: false,
+        connectTimeoutMs: 60000, // Increase timeout to 60s to handle 408
+        defaultQueryTimeoutMs: 60000
     });
 
     sock.ev.on('connection.update', (update) => {
@@ -94,8 +98,11 @@ async function connectToWhatsApp() {
     // Start SLA Sub-service
     // Note: This monitors the database for pending replies and sends WhatsApp alerts.
     // It works as long as the WhatsApp connection is open.
-    console.log('📊 Initializing SLA Monitor...');
-    startSLAMonitor();
+    if (!slaMonitorStarted) {
+        console.log('📊 Initializing SLA Monitor...');
+        startSLAMonitor();
+        slaMonitorStarted = true;
+    }
 
     sock.ev.on('messages.upsert', async m => {
         const messages = m.messages;
@@ -131,7 +138,19 @@ async function connectToWhatsApp() {
                         const success = await supabaseService.saveEmployeeToken(employeeId, 'gmail', tokens);
                         
                         if (success) {
-                            await sock.sendMessage(remoteJid, { text: '✅ *VAULT SECURED* ✅\n\nYour Gmail credentials have been moved to the encrypted vault. OMNI-BRAIN is now monitoring your inbox.' });
+                            // NEW: Fetch and update emailId in employees table
+                            try {
+                                const profile = await gmailService.getProfile(tokens);
+                                if (profile && profile.emailAddress) {
+                                    await supabaseService.updateEmployeeEmail(employeeId, profile.emailAddress);
+                                    await sock.sendMessage(remoteJid, { text: `✅ *VAULT SECURED* ✅\n\nYour inbox (*${profile.emailAddress}*) is now connected. OMNI-BRAIN is monitoring your Gmail.` });
+                                } else {
+                                    await sock.sendMessage(remoteJid, { text: '✅ *VAULT SECURED* ✅\n\nYour Gmail credentials have been moved to the encrypted vault.' });
+                                }
+                            } catch (profErr) {
+                                console.error('⚠️ Could not fetch Gmail profile:', profErr.message);
+                                await sock.sendMessage(remoteJid, { text: '✅ *VAULT SECURED* ✅\n\nCredentials saved, but could not verify email address.' });
+                            }
                         } else {
                             throw new Error('Database Vault RPC failed. Did you run the SQL script?');
                         }
@@ -222,16 +241,21 @@ async function connectToWhatsApp() {
 
 
     
-    cron.schedule('41 21 * * *', async () => {
-        console.log('⏰ Sending daily report...');
-        await generateAndSendReport(sock);
-    }, { scheduled: true, timezone: "Asia/Kolkata" });
+    // 📊 Daily Reports
+    if (!cronJobsStarted) {
+        cron.schedule('41 21 * * *', async () => {
+            console.log('⏰ Sending daily report...');
+            await generateAndSendReport(sock);
+        }, { scheduled: true, timezone: "Asia/Kolkata" });
 
-    // 🕸️ Daily Knowledge Graph Batch Update
-    cron.schedule('30 23 * * *', async () => {
-        console.log('⏰ Starting Daily Knowledge Graph Batch Update...');
-        await intelligenceService.runDailyGraphUpdate();
-    }, { scheduled: true, timezone: "Asia/Kolkata" });
+        // 🕸️ Daily Knowledge Graph Batch Update
+        cron.schedule('30 23 * * *', async () => {
+            console.log('⏰ Starting Daily Knowledge Graph Batch Update...');
+            await intelligenceService.runDailyGraphUpdate();
+        }, { scheduled: true, timezone: "Asia/Kolkata" });
+        cronJobsStarted = true;
+
+    }
 }
 
 module.exports = { connectToWhatsApp };

@@ -22,4 +22,7 @@ emailProcessor.connectToEmail().catch(err => {
     console.error('❌ Critical Email Startup Error:', err.message);
 });
 
+// 3. Initialize Management API & Dashboard Server
+require('./server');
+
 console.log('✅ Omni-Brain Orchestrator is running.');
