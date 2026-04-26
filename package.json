@@ -15,7 +15,6 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "wa-field-tracker-core": "github:CodeDetector/spine#path:core",
     "wa-field-tracker-feeder-email": "github:CodeDetector/mapMyEmail",
     "wa-field-tracker-feeder-whatsapp": "github:CodeDetector/mapMyWhatsapp",
     "cors": "^2.8.6",

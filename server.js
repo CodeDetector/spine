@@ -1,6 +1,6 @@
 const express = require('express');
 const path = require('path');
-const { config, supabaseService } = require('wa-field-tracker-core');
+const { config, supabaseService } = require('./core');
 const { gmailService } = require('wa-field-tracker-feeder-email');
 
 const cors = require('cors');
@@ -13,26 +13,45 @@ app.use(express.json());
 app.use(express.static('public'));
 
 // In-memory state for WhatsApp (Microservice reporting)
-let whatsappStatus = {
-    connected: false,
-    qr: null,
-    lastUpdate: null
-};
+const whatsappSessions = {};
 
 // WhatsApp Status Endpoints (for UI and WhatsApp Service)
 app.get('/api/whatsapp/status', (req, res) => {
-    res.json(whatsappStatus);
+    const { employeeId } = req.query;
+    if (employeeId) {
+        return res.json(whatsappSessions[employeeId] || { connected: false, qr: null });
+    }
+    res.json(whatsappSessions);
 });
 
 app.post('/api/whatsapp/update-status', (req, res) => {
-    const { connected, qr } = req.body;
-    whatsappStatus = {
+    const { employeeId = 'default', connected, qr } = req.body;
+    whatsappSessions[employeeId] = {
         connected: !!connected,
         qr: qr || null,
         lastUpdate: new Date().toISOString()
     };
-    console.log(`📱 WhatsApp Status Updated: ${connected ? 'Connected' : 'Disconnected (QR: ' + (qr ? 'Present' : 'None') + ')'}`);
+    console.log(`📱 WhatsApp Status [${employeeId}]: ${connected ? 'Connected' : 'Disconnected (QR: ' + (qr ? 'Present' : 'None') + ')'}`);
     res.json({ success: true });
+});
+
+app.post('/api/whatsapp/start-session', async (req, res) => {
+    const { employeeId } = req.body;
+    if (!employeeId) return res.status(400).json({ error: 'Missing employeeId' });
+
+    try {
+        // Forward request to WhatsApp microservice (listening on 3001)
+        const response = await fetch('http://localhost:3001/api/sessions/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ employeeId })
+        });
+        const result = await response.json();
+        res.json(result);
+    } catch (err) {
+        console.error('❌ Failed to start WhatsApp session:', err.message);
+        res.status(500).json({ error: 'Failed to communicate with WhatsApp service' });
+    }
 });
 
 
