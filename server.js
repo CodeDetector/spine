@@ -12,6 +12,30 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// In-memory state for WhatsApp (Microservice reporting)
+let whatsappStatus = {
+    connected: false,
+    qr: null,
+    lastUpdate: null
+};
+
+// WhatsApp Status Endpoints (for UI and WhatsApp Service)
+app.get('/api/whatsapp/status', (req, res) => {
+    res.json(whatsappStatus);
+});
+
+app.post('/api/whatsapp/update-status', (req, res) => {
+    const { connected, qr } = req.body;
+    whatsappStatus = {
+        connected: !!connected,
+        qr: qr || null,
+        lastUpdate: new Date().toISOString()
+    };
+    console.log(`📱 WhatsApp Status Updated: ${connected ? 'Connected' : 'Disconnected (QR: ' + (qr ? 'Present' : 'None') + ')'}`);
+    res.json({ success: true });
+});
+
+
 // Secure API Endpoints (Proxies to Supabase)
 app.get('/api/employees', async (req, res) => {
     const employees = await supabaseService.getAllEmployees();
