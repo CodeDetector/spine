@@ -15,16 +15,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@google/genai": "^1.47.0",
-    "@supabase/supabase-js": "^2.103.0",
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
-    "dotenv": "^17.3.1",
+    "wa-field-tracker-core": "file:./core",
+    "wa-field-tracker-feeder-email": "github:CodeDetector/mapMyEmail",
+    "wa-field-tracker-feeder-whatsapp": "github:CodeDetector/mapMyWhatsapp",
+    "cors": "^2.8.6",
     "express": "^5.2.1",
-    "googleapis": "^171.4.0",
-    "node-cron": "^4.2.1",
-    "pino": "^10.3.1",
-    "qrcode-terminal": "^0.12.0",
-    "tesseract.js": "^7.0.0",
-    "xlsx": "^0.18.5"
+    "pino": "^10.3.1"
   }
 }

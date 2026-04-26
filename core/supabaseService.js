@@ -561,10 +561,14 @@ class SupabaseService {
         if (!this.client || provider !== 'gmail') return null;
         try {
             console.log(`🔐 Vault: Encrypting credentials for Employee ${employeeId}...`);
-            const { error } = await this.client.rpc('save_gmail_secret', {
-                emp_id: employeeId,
-                token_json: JSON.stringify(tokenData)
-            });
+            const secretName = `gmail_token_${employeeId}`;
+            const { error } = await this.client
+                .from('omnibrain_vault.secrets')
+                .upsert({
+                    name: secretName,
+                    secret_json: tokenData,
+                    descrioption: 'gmail'
+                }, { onConflict: 'name' });
 
             if (error) throw error;
             console.log(`✅ Vault: Secret locked for Employee ${employeeId}.`);
@@ -594,19 +598,72 @@ class SupabaseService {
     async getAuthenticatedEmployees(provider = 'gmail') {
         if (!this.client || provider !== 'gmail') return [];
         try {
-            const { data, error } = await this.client.rpc('get_all_gmail_secrets');
-
+            // First get all secrets
+            const { data: secrets, error } = await this.client.rpc('get_all_gmail_secrets');
             if (error) throw error;
             
-            // Join with employees table to get extra metadata if needed locally
-            // But for polling, we mainly need ID and Tokens
-            return data.map(record => ({
-                employee_id: record.employee_id,
-                token_data: record.token_data
-            }));
+            // Then get enabled status for this provider
+            const { data: statuses } = await this.client
+                .from('employee_integrations')
+                .select('employee_id, is_enabled')
+                .eq('provider', provider);
+
+            const enabledMap = {};
+            if (statuses) {
+                statuses.forEach(s => enabledMap[s.employee_id] = s.is_enabled);
+            }
+
+            // Filter only those who are enabled (default to enabled if record missing, or disabled? User said "only if enabled")
+            // To be safe, we'll assume they must explicitly have it enabled or we auto-enable upon connect.
+            return secrets
+                .filter(record => enabledMap[record.employee_id] !== false) // Default true if status entry missing
+                .map(record => ({
+                    employee_id: record.employee_id,
+                    token_data: record.token_data
+                }));
         } catch (err) {
             console.error(`❌ Vault Retrieval Error:`, err.message);
             return [];
+        }
+    }
+
+    async toggleIntegration(employeeId, provider, status) {
+        if (!this.client) return null;
+        try {
+            const { error } = await this.client.rpc('toggle_integration', {
+                emp_id: employeeId,
+                integration_provider: provider,
+                status: status
+            });
+            if (error) throw error;
+            console.log(`🔌 Integration [${provider}] for employee ${employeeId} set to: ${status}`);
+            return true;
+        } catch (err) {
+            console.error(`❌ Toggle Integration Error:`, err.message);
+            return false;
+        }
+    }
+
+    async removeEmployeeSecret(employeeId, provider = 'gmail') {
+        if (!this.client || provider !== 'gmail') return false;
+        try {
+            const secretName = `gmail_token_${employeeId}`;
+            console.log(`🗑️ Vault: Removing ${provider} secrets for Employee ${employeeId}...`);
+            const { error } = await this.client
+                .from('omnibrain_vault.secrets')
+                .delete()
+                .eq('name', secretName);
+
+            if (error) throw error;
+            
+            // Also disable the integration status record
+            await this.toggleIntegration(employeeId, provider, false);
+            
+            console.log(`✅ Vault: Secrets cleared for Employee ${employeeId}.`);
+            return true;
+        } catch (err) {
+            console.error(`❌ Vault Removal Error:`, err.message);
+            return false;
         }
     }
 
@@ -664,6 +721,54 @@ class SupabaseService {
             };
         } catch (err) {
             console.error(`❌ getGraphContext failed for ${employeeName}:`, err.message);
+            return { nodes: [], edges: [] };
+        }
+    }
+
+    // --- Management API Support ---
+
+    async getAllEmployees() {
+        if (!this.client) return [];
+        try {
+            const { data, error } = await this.client.from('employees').select('*').order('name');
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ getAllEmployees failed:', err.message);
+            return [];
+        }
+    }
+
+    async getDashboardStats() {
+        if (!this.client) return null;
+        try {
+            const { count: empCount } = await this.client.from('employees').select('*', { count: 'exact', head: true });
+            const { count: msgCount } = await this.client.from('messages').select('*', { count: 'exact', head: true });
+            const { count: nodeCount } = await this.client.from('nodes').select('*', { count: 'exact', head: true });
+            const { count: edgeCount } = await this.client.from('edges').select('*', { count: 'exact', head: true });
+
+            return {
+                totalEmployees: empCount || 0,
+                totalMessages: msgCount || 0,
+                knowledgeNodes: nodeCount || 0,
+                relationships: edgeCount || 0,
+                systemHealth: 'Healthy'
+            };
+        } catch (err) {
+            console.error('❌ getDashboardStats failed:', err.message);
+            return null;
+        }
+    }
+
+    async getFullGraph() {
+        if (!this.client) return { nodes: [], edges: [] };
+        try {
+            const { data: nodes, error: nErr } = await this.client.from('nodes').select('*');
+            const { data: edges, error: eErr } = await this.client.from('edges').select('*');
+            if (nErr || eErr) throw nErr || eErr;
+            return { nodes, edges };
+        } catch (err) {
+            console.error('❌ getFullGraph failed:', err.message);
             return { nodes: [], edges: [] };
         }
     }

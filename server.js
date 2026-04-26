@@ -1,21 +1,52 @@
 const express = require('express');
 const path = require('path');
-const config = require('./core/config');
-const gmailService = require('./feeder-email/service');
-const supabaseService = require('./core/supabaseService');
+const { config, supabaseService } = require('wa-field-tracker-core');
+const { gmailService } = require('wa-field-tracker-feeder-email');
 
+const cors = require('cors');
 const app = express();
 const PORT = 3000;
 
-// Middleware to serve static files
+// Middleware
+app.use(cors());
+app.use(express.json());
 app.use(express.static('public'));
 
-// Endpoint to provide safe config to the frontend
-app.get('/api/config', (req, res) => {
-    res.json({
-        supabaseUrl: config.SUPABASE_URL,
-        supabaseKey: config.SUPABASE_KEY
-    });
+// Secure API Endpoints (Proxies to Supabase)
+app.get('/api/employees', async (req, res) => {
+    const employees = await supabaseService.getAllEmployees();
+    res.json(employees);
+});
+
+app.get('/api/stats', async (req, res) => {
+    const stats = await supabaseService.getDashboardStats();
+    res.json(stats);
+});
+
+app.get('/api/graph/full', async (req, res) => {
+    const graph = await supabaseService.getFullGraph();
+    res.json(graph);
+});
+
+app.post('/api/employees/toggle-integration', async (req, res) => {
+    const { employeeId, provider, enabled } = req.body;
+    if (!employeeId || !provider) return res.status(400).json({ error: 'Missing parameters' });
+    const success = await supabaseService.toggleIntegration(employeeId, provider, enabled);
+    res.json({ success });
+});
+
+app.post('/api/employees/remove-integration', async (req, res) => {
+    const { employeeId, provider } = req.body;
+    if (!employeeId || !provider) return res.status(400).json({ error: 'Missing parameters' });
+    const success = await supabaseService.removeEmployeeSecret(employeeId, provider);
+    res.json({ success });
+});
+
+app.get('/api/graph/context', async (req, res) => {
+    const { name } = req.query;
+    if (!name) return res.status(400).json({ error: 'Name required' });
+    const context = await supabaseService.getGraphContext(name);
+    res.json(context);
 });
 
 // Gmail Auth Endpoints

@@ -7,20 +7,16 @@
  * 3. Management Analytics (server.js - can be started separately)
  */
 
-const whatsappProcessor = require('./feeder-whatsapp/processor');
-const emailProcessor = require('./feeder-email/processor');
+const { whatsappProcessor } = require('wa-field-tracker-feeder-whatsapp');
+const { gmailProcessor } = require('wa-field-tracker-feeder-email');
 
 console.log('🚀 Starting Omni-Brain Intelligence System...');
 
 // 1. Initialize WhatsApp and its cross-channel monitors (SLA)
-whatsappProcessor.connectToWhatsApp().catch(err => {
-    console.error('❌ Critical WhatsApp Startup Error:', err.message);
-});
+require('wa-field-tracker-feeder-whatsapp').run();
 
 // 2. Initialize Email Ingestion
-emailProcessor.connectToEmail().catch(err => {
-    console.error('❌ Critical Email Startup Error:', err.message);
-});
+require('wa-field-tracker-feeder-email').run();
 
 // 3. Initialize Management API & Dashboard Server
 require('./server');
