@@ -730,12 +730,28 @@ class SupabaseService {
     async getAllEmployees() {
         if (!this.client) return [];
         try {
-            const { data, error } = await this.client.from('employees').select('*').order('name');
+            const { data, error } = await this.client.from('employees').select('*').order('Name');
             if (error) throw error;
             return data;
         } catch (err) {
             console.error('❌ getAllEmployees failed:', err.message);
             return [];
+        }
+    }
+
+    async getEmployeeById(id) {
+        if (!this.client || !id) return null;
+        try {
+            const { data, error } = await this.client
+                .from('employees')
+                .select('id, Name, Mobile, contact, emailId')
+                .eq('id', id)
+                .single();
+            if (error) return null;
+            return data;
+        } catch (err) {
+            console.error(`❌ getEmployeeById failed for id ${id}:`, err.message);
+            return null;
         }
     }
 
@@ -770,6 +786,21 @@ class SupabaseService {
         } catch (err) {
             console.error('❌ getFullGraph failed:', err.message);
             return { nodes: [], edges: [] };
+        }
+    }
+    async createEmployee(employeeData) {
+        if (!this.client) return null;
+        try {
+            const { data, error } = await this.client
+                .from('employees')
+                .insert([employeeData])
+                .select()
+                .single();
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ createEmployee failed:', err.message);
+            return null;
         }
     }
 }

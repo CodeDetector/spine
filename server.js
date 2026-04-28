@@ -61,6 +61,19 @@ app.get('/api/employees', async (req, res) => {
     res.json(employees);
 });
 
+app.post('/api/employees', async (req, res) => {
+    const employeeData = req.body;
+    if (!employeeData.Name || !employeeData.Mobile) {
+        return res.status(400).json({ error: 'Name and Mobile are required' });
+    }
+    const newEmployee = await supabaseService.createEmployee(employeeData);
+    if (newEmployee) {
+        res.status(201).json(newEmployee);
+    } else {
+        res.status(500).json({ error: 'Failed to create employee' });
+    }
+});
+
 app.get('/api/stats', async (req, res) => {
     const stats = await supabaseService.getDashboardStats();
     res.json(stats);
@@ -109,7 +122,7 @@ app.get('/api/gmail-callback', async (req, res) => {
     try {
         const tokens = await gmailService.getTokens(code);
         const success = await supabaseService.saveEmployeeToken(employeeId, 'gmail', tokens);
-        
+
         if (success) {
             res.send('<h1>✅ Gmail Linked Successfully!</h1><p>You can close this window now.</p><script>setTimeout(() => window.close(), 3000)</script>');
         } else {
