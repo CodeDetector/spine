@@ -84,6 +84,12 @@ app.get('/api/graph/full', async (req, res) => {
     res.json(graph);
 });
 
+app.get('/api/graph/channels', async (req, res) => {
+    const channels = (req.query.channels || '').split(',').map(s => s.trim()).filter(Boolean);
+    const graph = await supabaseService.getGraphByChannels(channels);
+    res.json(graph);
+});
+
 app.post('/api/employees/toggle-integration', async (req, res) => {
     const { employeeId, provider, enabled } = req.body;
     if (!employeeId || !provider) return res.status(400).json({ error: 'Missing parameters' });
@@ -103,6 +109,58 @@ app.get('/api/graph/context', async (req, res) => {
     if (!name) return res.status(400).json({ error: 'Name required' });
     const context = await supabaseService.getGraphContext(name);
     res.json(context);
+});
+
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.post('/api/agent/chat', async (req, res) => {
+    const { prompt } = req.body;
+    if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
+
+    // Dynamically import intelligence service to use it
+    const { intelligenceService } = require('./core');
+    const result = await intelligenceService.chatWithAgent(prompt);
+    res.json(result);
+});
+
+// Knowledge-map chat — session memory held in-process on the backend
+app.post('/api/graph/chat', async (req, res) => {
+    const { sessionId, userMessage, context } = req.body;
+    if (!userMessage) return res.status(400).json({ error: 'userMessage is required' });
+    if (!sessionId)   return res.status(400).json({ error: 'sessionId is required' });
+
+    const { intelligenceService } = require('./core');
+    const result = await intelligenceService.chatWithGraph(sessionId, userMessage, context || '');
+    res.json(result);
+});
+
+app.delete('/api/graph/chat/session/:sessionId', (req, res) => {
+    const { intelligenceService } = require('./core');
+    intelligenceService.clearChatSession(req.params.sessionId);
+    res.json({ cleared: true });
+});
+
+app.post('/api/agent/upload', upload.single('document'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No document uploaded' });
+    
+    try {
+        const { intelligenceService, supabaseService } = require('./core');
+        
+        // Save to bucket
+        const bucket = 'documents'; // Ensure this bucket exists or create it
+        const path = `uploads/${Date.now()}_${req.file.originalname}`;
+        await supabaseService.uploadFile(bucket, path, req.file.buffer, req.file.mimetype);
+        
+        // Parse doc and update map
+        const textContent = req.file.buffer.toString('utf8'); // basic parse for text/csv
+        await intelligenceService.parseDocumentForGraph(textContent, req.file.originalname);
+        
+        res.json({ success: true, message: 'Document parsed and knowledge map updated.' });
+    } catch (err) {
+        console.error('❌ Document upload error:', err);
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Gmail Auth Endpoints

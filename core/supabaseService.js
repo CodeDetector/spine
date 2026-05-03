@@ -788,6 +788,43 @@ class SupabaseService {
             return { nodes: [], edges: [] };
         }
     }
+
+    async getGraphByChannels(channels) {
+        if (!this.client) return { nodes: [], edges: [] };
+        try {
+            const { data: allNodes, error: nErr } = await this.client.from('nodes').select('*');
+            const { data: allEdges, error: eErr } = await this.client.from('edges').select('*');
+            if (nErr || eErr) throw nErr || eErr;
+
+            if (!channels || channels.length === 0) {
+                return { nodes: [], edges: [] };
+            }
+
+            // Node types surfaced by each channel
+            const channelNodeTypes = {
+                personal_whatsapp: ['Employee'],
+                personal_email:    ['Employee'],
+                business_whatsapp: ['Employee', 'Client', 'Product', 'Price', 'Deadline'],
+                business_email:    ['Employee', 'Client', 'Price', 'Deadline'],
+                business_info:     ['Client', 'Supplier', 'Product'],
+            };
+
+            const allowedTypes = new Set();
+            channels.forEach(ch => (channelNodeTypes[ch] || []).forEach(t => allowedTypes.add(t)));
+
+            const filteredNodes = (allNodes || []).filter(n => allowedTypes.has(n.type));
+            const nodeIds = new Set(filteredNodes.map(n => n.id));
+            const filteredEdges = (allEdges || []).filter(
+                e => nodeIds.has(e.from_node_id) && nodeIds.has(e.to_node_id)
+            );
+
+            return { nodes: filteredNodes, edges: filteredEdges };
+        } catch (err) {
+            console.error('❌ getGraphByChannels failed:', err.message);
+            return { nodes: [], edges: [] };
+        }
+    }
+
     async createEmployee(employeeData) {
         if (!this.client) return null;
         try {
@@ -801,6 +838,151 @@ class SupabaseService {
         } catch (err) {
             console.error('❌ createEmployee failed:', err.message);
             return null;
+        }
+    }
+    async upsertSupplier(supplierName, properties = {}) {
+        if (!this.client) return null;
+        try {
+            const { data: existing, error: checkError } = await this.client
+                .from('suppliers')
+                .select('id')
+                .eq('name', supplierName)
+                .maybeSingle();
+
+            if (checkError && checkError.code === '42P01') {
+                console.warn('⚠️ suppliers table does not exist yet.');
+                return null;
+            }
+
+            if (existing) {
+                const { data: updated, error: updateError } = await this.client
+                    .from('suppliers')
+                    .update({ ...properties })
+                    .eq('id', existing.id)
+                    .select()
+                    .single();
+                if (updateError) throw updateError;
+                return updated.id;
+            } else {
+                const { data: inserted, error: insertError } = await this.client
+                    .from('suppliers')
+                    .insert([{ name: supplierName, ...properties }])
+                    .select()
+                    .single();
+                if (insertError) throw insertError;
+                return inserted.id;
+            }
+        } catch (err) {
+            console.error(`❌ upsertSupplier failed for ${supplierName}:`, err.message);
+            return null;
+        }
+    }
+
+    async upsertProduct(productName, supplierId, properties = {}) {
+        if (!this.client) return null;
+        try {
+            // Check if table exists by doing a quick select
+            const { data: existing, error: checkError } = await this.client
+                .from('products')
+                .select('id')
+                .eq('product_name', productName)
+                .maybeSingle();
+
+            if (checkError && checkError.code === '42P01') {
+                console.warn('⚠️ products table does not exist yet. Please run create_products_table.sql');
+                return null; // Table doesn't exist
+            }
+
+            if (existing) {
+                // Update
+                const { data: updated, error: updateError } = await this.client
+                    .from('products')
+                    .update({ 
+                        ...properties,
+                        supplier_id: supplierId,
+                        updated_at: new Date() 
+                    })
+                    .eq('id', existing.id)
+                    .select()
+                    .single();
+                if (updateError) throw updateError;
+                return updated;
+            } else {
+                // Insert
+                const { data: inserted, error: insertError } = await this.client
+                    .from('products')
+                    .insert([{
+                        product_name: productName,
+                        supplier_id: supplierId,
+                        ...properties
+                    }])
+                    .select()
+                    .single();
+                if (insertError) throw insertError;
+                return inserted;
+            }
+        } catch (err) {
+            console.error(`❌ upsertProduct failed for ${productName}:`, err.message);
+            return null;
+        }
+    }
+
+    async buildBusinessKnowledgeMap(businessName = 'My Business') {
+        if (!this.client) return false;
+        try {
+            console.log(`🗺️ Building knowledge map for: ${businessName}`);
+            
+            // 1. Create central Business node
+            const businessNodeId = await this.upsertNode('Business', businessName, { created_by: 'system' });
+            if (!businessNodeId) throw new Error('Failed to create central business node');
+
+            // 2. Fetch Clients
+            const { data: clients, error: clientsError } = await this.client
+                .from('clients')
+                .select('*');
+            
+            if (clientsError && clientsError.code !== '42P01') { // Ignore missing table error
+                console.error('❌ Error fetching clients:', clientsError.message);
+            }
+
+            // 3. Fetch Suppliers
+            const { data: suppliers, error: suppliersError } = await this.client
+                .from('suppliers')
+                .select('*');
+
+            if (suppliersError && suppliersError.code !== '42P01') { // Ignore missing table error
+                console.error('❌ Error fetching suppliers:', suppliersError.message);
+            }
+
+            // 4. Map Clients
+            if (clients && clients.length > 0) {
+                for (const client of clients) {
+                    const clientName = client.ClientName || client.name || `Client_${client.id}`;
+                    const clientNodeId = await this.upsertNode('Client', clientName, client);
+                    if (clientNodeId) {
+                        await this.createEdge(businessNodeId, clientNodeId, 'HAS_CLIENT');
+                    }
+                }
+                console.log(`✅ Mapped ${clients.length} clients to the knowledge map.`);
+            }
+
+            // 5. Map Suppliers
+            if (suppliers && suppliers.length > 0) {
+                for (const supplier of suppliers) {
+                    const supplierName = supplier.SupplierName || supplier.name || `Supplier_${supplier.id}`;
+                    const supplierNodeId = await this.upsertNode('Supplier', supplierName, supplier);
+                    if (supplierNodeId) {
+                        await this.createEdge(businessNodeId, supplierNodeId, 'HAS_SUPPLIER');
+                    }
+                }
+                console.log(`✅ Mapped ${suppliers.length} suppliers to the knowledge map.`);
+            }
+
+            console.log(`✅ Successfully built business knowledge map for ${businessName}`);
+            return true;
+        } catch (err) {
+            console.error('❌ buildBusinessKnowledgeMap failed:', err.message);
+            return false;
         }
     }
 }

@@ -15,10 +15,11 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "wa-field-tracker-feeder-email": "github:CodeDetector/mapMyEmail",
-    "wa-field-tracker-feeder-whatsapp": "github:CodeDetector/mapMyWhatsapp",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "pino": "^10.3.1"
+    "multer": "^2.1.1",
+    "pino": "^10.3.1",
+    "wa-field-tracker-feeder-email": "github:CodeDetector/mapMyEmail",
+    "wa-field-tracker-feeder-whatsapp": "github:CodeDetector/mapMyWhatsapp"
   }
 }

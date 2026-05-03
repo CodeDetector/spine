@@ -4,10 +4,26 @@ services:
   omni-whatsapp:
     build: .
     container_name: omni-whatsapp
-    command: node start-whatsapp.js
+    command: cd mapMyWhatsapp && node index.js
+    ports:
+      - "3001:3001"
+    environment:
+      - WHATSAPP_API_TYPE=cloud
+      - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
+      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
+      - WHATSAPP_BUSINESS_ACCOUNT_ID=${WHATSAPP_BUSINESS_ACCOUNT_ID}
+      - WHATSAPP_APP_SECRET=${WHATSAPP_APP_SECRET}
+      - WHATSAPP_WEBHOOK_VERIFY_TOKEN=${WHATSAPP_WEBHOOK_VERIFY_TOKEN}
+      - WHATSAPP_WEBHOOK_URL=${WHATSAPP_WEBHOOK_URL}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - ALLOWED_GROUPS=${ALLOWED_GROUPS}
+      - ALLOW_PRIVATE_CHATS=${ALLOW_PRIVATE_CHATS}
     volumes:
       - ./.env:/app/.env
-      - ./auth_info_baileys:/app/auth_info_baileys
       - ./gmail-tokens.json:/app/gmail-tokens.json
     restart: unless-stopped
     logging:
@@ -15,11 +31,19 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - omni-network
 
   omni-gmail:
     build: .
     container_name: omni-gmail
-    command: node start-gmail.js
+    command: cd mapMyEmail && node index.js
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
     volumes:
       - ./.env:/app/.env
       - ./gmail-tokens.json:/app/gmail-tokens.json
@@ -31,13 +55,32 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    networks:
+      - omni-network
 
   omni-dashboard:
     build: .
     container_name: omni-dashboard
-    command: node server.js
+    command: cd wa-field-tracker && node server.js
     ports:
       - "3000:3000"
+    environment:
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./.env:/app/.env
     restart: unless-stopped
+    depends_on:
+      - omni-whatsapp
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - omni-network
+
+networks:
+  omni-network:
+    driver: bridge
