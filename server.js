@@ -124,6 +124,18 @@ app.post('/api/agent/chat', async (req, res) => {
     res.json(result);
 });
 
+// Business profile — persisted to data/business_profile.json
+app.get('/api/business/profile', (req, res) => {
+    const { profileService } = require('./core');
+    res.json(profileService.readProfile());
+});
+
+app.put('/api/business/profile', (req, res) => {
+    const { profileService } = require('./core');
+    const updated = profileService.writeProfile(req.body);
+    res.json(updated);
+});
+
 // Knowledge-map chat — session memory held in-process on the backend
 app.post('/api/graph/chat', async (req, res) => {
     const { sessionId, userMessage, context } = req.body;

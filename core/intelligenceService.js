@@ -179,8 +179,12 @@ class IntelligenceService {
 
         console.log(`🧠 Knowledge-Map Chat [${sessionId.slice(0, 8)}]: turn ${session.turns.length / 2 + 1}`);
 
-        const systemInstruction = `You are a business intelligence assistant analyzing a knowledge graph.
+        const { formatProfileForPrompt } = require('./profileService');
+        const profile = require('./profileService').readProfile();
+        const profileBlock = formatProfileForPrompt(profile);
 
+        const systemInstruction = `You are a business intelligence assistant helping the employee of this business understand their knowledge graph.
+${profileBlock ? '\n' + profileBlock + '\n' : ''}
 === Knowledge Graph Context ===
 ${context}
 ================================
