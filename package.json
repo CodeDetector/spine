@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "jest --no-coverage",
     "start": "node index.js",
     "gmail-setup": "node feeder-email/setup.js",
     "dashboard": "node server.js",
@@ -21,5 +21,8 @@
     "pino": "^10.3.1",
     "wa-field-tracker-feeder-email": "github:CodeDetector/mapMyEmail",
     "wa-field-tracker-feeder-whatsapp": "github:CodeDetector/mapMyWhatsapp"
+  },
+  "devDependencies": {
+    "jest": "^30.3.0"
   }
 }

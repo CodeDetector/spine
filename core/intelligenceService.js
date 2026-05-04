@@ -20,9 +20,9 @@ class IntelligenceService {
         try {
             console.log('🧠 Omni-Brain: Analyzing message for Knowledge Graph extraction...');
             
-            const client = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
+            const client = this.genAI;
             const prompt = graphExtractionPrompt(messageText);
-            
+
             const result = await client.models.generateContent({
                 model: 'gemma-4-31b-it',
                 contents: [{ role: 'user', parts: [{ text: prompt }] }]
@@ -75,16 +75,16 @@ class IntelligenceService {
 
             console.log(`🧠 Omni-Brain: Sending ${messages.length + emails.length} records to Gemini...`);
 
-            const client = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
+            const client = this.genAI;
             const prompt = graphExtractionPrompt(logBlob);
-            
+
             const result = await client.models.generateContent({
                 model: 'gemma-4-31b-it',
                 contents: [{ role: 'user', parts: [{ text: prompt }] }]
             });
-            
+
             const responseText = result.text.replace(/```json|```/g, '').trim();
-            
+
             let graphData;
             try {
                 graphData = JSON.parse(responseText);
@@ -205,7 +205,7 @@ Rules:
             }));
             contents.push({ role: 'user', parts: [{ text: userMessage }] });
 
-            const client = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
+            const client = this.genAI;
             const result = await client.models.generateContent({
                 model: 'gemini-2.5-flash',
                 config: { systemInstruction },
@@ -241,8 +241,8 @@ Rules:
             // If graph is too large, we might need to filter, but for now we send it all
             const systemPrompt = `You are an AI Business Agent. You have access to the following business knowledge map containing nodes (employees, clients, suppliers) and relationships:\n\n${graphContext}\n\nBased on this knowledge map, answer the user's query: "${prompt}".\nIf they ask about a specific client or supplier, analyze their relationships. Provide a helpful, clear, and professional response.`;
 
-            const client = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
-            
+            const client = this.genAI;
+
             const result = await client.models.generateContent({
                 model: 'gemma-4-31b-it',
                 contents: [{ role: 'user', parts: [{ text: systemPrompt }] }]
@@ -266,10 +266,10 @@ Rules:
             
             const prompt = `Extract knowledge graph nodes and edges from the following document text. Return ONLY valid JSON matching this schema: {"nodes":[{"type":"Client|Supplier|Employee|Business|Other","name":"...","properties":{}}],"edges":[{"from":"...","to":"...","type":"..."}]}.\n\nDocument Context: ${textContent.substring(0, 50000)}`;
 
-            const client = new GoogleGenAI({ apiKey: config.GEMINI_API_KEY });
-            
+            const client = this.genAI;
+
             const result = await client.models.generateContent({
-                model: 'gemma-4-31b-it', // Using existing model configuration
+                model: 'gemma-4-31b-it',
                 contents: [{ role: 'user', parts: [{ text: prompt }] }]
             });
             

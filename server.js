@@ -12,8 +12,73 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
+// Auth middleware — validates the Bearer JWT from Supabase
+async function requireAuth(req, res, next) {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const { data: { user }, error } = await supabaseService.client.auth.getUser(token);
+        if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
+        req.user = user;
+        next();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+}
+
 // In-memory state for WhatsApp (Microservice reporting)
 const whatsappSessions = {};
+
+// Auth Endpoints
+app.post('/api/auth/register', async (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    try {
+        const { createClient } = require('@supabase/supabase-js');
+        const tempClient = createClient(config.SUPABASE_URL, config.SUPABASE_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false }
+        });
+        const { data, error } = await tempClient.auth.signUp({ email, password });
+        if (error) return res.status(400).json({ error: error.message });
+        res.json({ success: true, needsConfirmation: !data.session });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+    try {
+        const { createClient } = require('@supabase/supabase-js');
+        const tempClient = createClient(config.SUPABASE_URL, config.SUPABASE_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false }
+        });
+        const { data, error } = await tempClient.auth.signInWithPassword({ email, password });
+        if (error) return res.status(401).json({ error: error.message });
+        const employee = await supabaseService.getEmployeeByEmail(email);
+        res.json({
+            user: { id: data.user.id, email: data.user.email },
+            session: data.session,
+            employee: employee || null
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/auth/me', async (req, res) => {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+        const { data: { user }, error } = await supabaseService.client.auth.getUser(token);
+        if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
+        const employee = await supabaseService.getEmployeeByEmail(user.email);
+        res.json({ user: { id: user.id, email: user.email }, employee: employee || null });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 
 // WhatsApp Status Endpoints (for UI and WhatsApp Service)
 app.get('/api/whatsapp/status', (req, res) => {
@@ -24,7 +89,7 @@ app.get('/api/whatsapp/status', (req, res) => {
     res.json(whatsappSessions);
 });
 
-app.post('/api/whatsapp/update-status', (req, res) => {
+app.post('/api/whatsapp/update-status', requireAuth, (req, res) => {
     const { employeeId = 'default', connected, qr } = req.body;
     whatsappSessions[employeeId] = {
         connected: !!connected,
@@ -56,12 +121,12 @@ app.post('/api/whatsapp/start-session', async (req, res) => {
 
 
 // Secure API Endpoints (Proxies to Supabase)
-app.get('/api/employees', async (req, res) => {
+app.get('/api/employees', requireAuth, async (req, res) => {
     const employees = await supabaseService.getAllEmployees();
     res.json(employees);
 });
 
-app.post('/api/employees', async (req, res) => {
+app.post('/api/employees', requireAuth, async (req, res) => {
     const employeeData = req.body;
     if (!employeeData.Name || !employeeData.Mobile) {
         return res.status(400).json({ error: 'Name and Mobile are required' });
@@ -74,47 +139,75 @@ app.post('/api/employees', async (req, res) => {
     }
 });
 
-app.get('/api/stats', async (req, res) => {
+app.get('/api/stats', requireAuth, async (req, res) => {
     const stats = await supabaseService.getDashboardStats();
     res.json(stats);
 });
 
-app.get('/api/graph/full', async (req, res) => {
+app.get('/api/graph/full', requireAuth, async (req, res) => {
     const graph = await supabaseService.getFullGraph();
     res.json(graph);
 });
 
-app.get('/api/graph/channels', async (req, res) => {
+app.get('/api/graph/channels', requireAuth, async (req, res) => {
     const channels = (req.query.channels || '').split(',').map(s => s.trim()).filter(Boolean);
     const graph = await supabaseService.getGraphByChannels(channels);
     res.json(graph);
 });
 
-app.post('/api/employees/toggle-integration', async (req, res) => {
+app.post('/api/employees/toggle-integration', requireAuth, async (req, res) => {
     const { employeeId, provider, enabled } = req.body;
     if (!employeeId || !provider) return res.status(400).json({ error: 'Missing parameters' });
     const success = await supabaseService.toggleIntegration(employeeId, provider, enabled);
     res.json({ success });
 });
 
-app.post('/api/employees/remove-integration', async (req, res) => {
+app.post('/api/employees/remove-integration', requireAuth, async (req, res) => {
     const { employeeId, provider } = req.body;
     if (!employeeId || !provider) return res.status(400).json({ error: 'Missing parameters' });
     const success = await supabaseService.removeEmployeeSecret(employeeId, provider);
     res.json({ success });
 });
 
-app.get('/api/graph/context', async (req, res) => {
+app.get('/api/graph/context', requireAuth, async (req, res) => {
     const { name } = req.query;
     if (!name) return res.status(400).json({ error: 'Name required' });
     const context = await supabaseService.getGraphContext(name);
     res.json(context);
 });
 
+// Enrich knowledge graph from employee's email history
+app.post('/api/graph/enrich', async (req, res) => {
+    const { employeeId, employeeName } = req.body;
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        const { intelligenceService } = require('./core');
+        const emails = await supabaseService.getEmailsByEmployeeId(employeeId, 30);
+
+        if (emails.length === 0) {
+            return res.json({ success: true, processed: 0 });
+        }
+
+        let logBlob = `--- EMAIL HISTORY FOR: ${employeeName || 'Employee'} ---\n\n`;
+        emails.forEach(e => {
+            logBlob += `[EMAIL] From: ${e.sender || ''} To: ${e.receiver || ''}\nContent: ${e.message || ''}\n\n`;
+        });
+
+        await intelligenceService.processMessageForGraph(logBlob, {
+            messageId: `EMAIL-ENRICH-${employeeId}-${Date.now()}`
+        });
+
+        res.json({ success: true, processed: emails.length });
+    } catch (err) {
+        console.error('❌ /api/graph/enrich error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 const multer = require('multer');
 const upload = multer({ storage: multer.memoryStorage() });
 
-app.post('/api/agent/chat', async (req, res) => {
+app.post('/api/agent/chat', requireAuth, async (req, res) => {
     const { prompt } = req.body;
     if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
 
@@ -125,19 +218,19 @@ app.post('/api/agent/chat', async (req, res) => {
 });
 
 // Business profile — persisted to data/business_profile.json
-app.get('/api/business/profile', (req, res) => {
+app.get('/api/business/profile', requireAuth, (req, res) => {
     const { profileService } = require('./core');
     res.json(profileService.readProfile());
 });
 
-app.put('/api/business/profile', (req, res) => {
+app.put('/api/business/profile', requireAuth, (req, res) => {
     const { profileService } = require('./core');
     const updated = profileService.writeProfile(req.body);
     res.json(updated);
 });
 
 // Knowledge-map chat — session memory held in-process on the backend
-app.post('/api/graph/chat', async (req, res) => {
+app.post('/api/graph/chat', requireAuth, async (req, res) => {
     const { sessionId, userMessage, context } = req.body;
     if (!userMessage) return res.status(400).json({ error: 'userMessage is required' });
     if (!sessionId)   return res.status(400).json({ error: 'sessionId is required' });
@@ -147,22 +240,22 @@ app.post('/api/graph/chat', async (req, res) => {
     res.json(result);
 });
 
-app.delete('/api/graph/chat/session/:sessionId', (req, res) => {
+app.delete('/api/graph/chat/session/:sessionId', requireAuth, (req, res) => {
     const { intelligenceService } = require('./core');
     intelligenceService.clearChatSession(req.params.sessionId);
     res.json({ cleared: true });
 });
 
-app.post('/api/agent/upload', upload.single('document'), async (req, res) => {
+app.post('/api/agent/upload', requireAuth, upload.single('document'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No document uploaded' });
     
     try {
         const { intelligenceService, supabaseService } = require('./core');
         
         // Save to bucket
-        const bucket = 'documents'; // Ensure this bucket exists or create it
-        const path = `uploads/${Date.now()}_${req.file.originalname}`;
-        await supabaseService.uploadFile(bucket, path, req.file.buffer, req.file.mimetype);
+        const bucket = 'documents';
+        const uploadPath = `uploads/${Date.now()}_${req.file.originalname}`;
+        await supabaseService.uploadFile(bucket, uploadPath, req.file.buffer, req.file.mimetype);
         
         // Parse doc and update map
         const textContent = req.file.buffer.toString('utf8'); // basic parse for text/csv
@@ -200,7 +293,7 @@ app.get('/api/gmail-callback', async (req, res) => {
         }
     } catch (err) {
         console.error('❌ UI Auth Error:', err.message);
-        res.status(500).send(`Error linking Gmail: ${err.message}`);
+        res.status(500).json({ error: `Error linking Gmail: ${err.message}` });
     }
 });
 

@@ -521,10 +521,11 @@ class SupabaseService {
     async upsertNode(type, name, properties = {}) {
         if (!this.client) return null;
         try {
-            // Find existing node by type and name
+            // Find existing node by type and name — must select 'properties' too so
+            // the update spread below can merge old and new properties correctly.
             const { data: existing, error: findError } = await this.client
                 .from('nodes')
-                .select('id')
+                .select('id, properties')
                 .eq('type', type)
                 .eq('name', name)
                 .maybeSingle();
@@ -537,6 +538,7 @@ class SupabaseService {
                     .eq('id', existing.id)
                     .select()
                     .single();
+                if (updateError) throw updateError;
                 return updated.id;
             }
 
@@ -567,7 +569,7 @@ class SupabaseService {
                 .upsert({
                     name: secretName,
                     secret_json: tokenData,
-                    descrioption: 'gmail'
+                    description: 'gmail'
                 }, { onConflict: 'name' });
 
             if (error) throw error;
@@ -822,6 +824,21 @@ class SupabaseService {
         } catch (err) {
             console.error('❌ getGraphByChannels failed:', err.message);
             return { nodes: [], edges: [] };
+        }
+    }
+
+    async getEmployeeByEmail(email) {
+        if (!this.client || !email) return null;
+        try {
+            const { data, error } = await this.client
+                .from('employees')
+                .select('id, Name, Role, Mobile, contact, emailId, managedBy')
+                .eq('emailId', email)
+                .maybeSingle();
+            if (error) return null;
+            return data;
+        } catch (err) {
+            return null;
         }
     }
 

@@ -1,8 +1,8 @@
 require('dotenv').config();
 
 module.exports = {
-    // Supports multiple groups by parsing a comma-separated string from .env, or using the default)s.
-    ALLOWED_GROUP_NAMES: process.env.ALLOWED_GROUPS
+    // Supports multiple groups by parsing a comma-separated string from .env, or using the default(s).
+    ALLOWED_GROUP_NAMES: (process.env.ALLOWED_GROUPS || '')
         .replace(/[\[\]]/g, "") // Remove brackets if present
         .split(",")
         .map(n => n.trim().replace(/^['"]|['"]$/g, "").toLowerCase())
