@@ -176,6 +176,14 @@ app.get('/api/graph/context', requireAuth, async (req, res) => {
     res.json(context);
 });
 
+// Pending follow-ups for an employee (email threads + KG commitments)
+app.get('/api/followups', async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    const data = await supabaseService.getPendingFollowups(employeeId);
+    res.json(data);
+});
+
 // Enrich knowledge graph from employee's email history
 app.post('/api/graph/enrich', async (req, res) => {
     const { employeeId, employeeName } = req.body;

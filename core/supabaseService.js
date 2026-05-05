@@ -827,6 +827,98 @@ class SupabaseService {
         }
     }
 
+    async getPendingFollowups(employeeId) {
+        if (!this.client || !employeeId) return { emails: [], commitments: [] };
+        try {
+            const employee = await this.getEmployeeById(employeeId);
+            if (!employee) return { emails: [], commitments: [] };
+
+            // ── 1. Pending email replies ─────────────────────────────────────
+            // Threads where the most recent email was sent by someone other than
+            // the employee — meaning the employee hasn't replied yet.
+            const since = new Date();
+            since.setDate(since.getDate() - 30);
+
+            const { data: emailRows } = await this.client
+                .from('emails')
+                .select('id, sender, receiver, message, created_at, threadId')
+                .eq('employeeId', employeeId)
+                .gte('created_at', since.toISOString())
+                .order('created_at', { ascending: false })
+                .limit(200);
+
+            const threads = {};
+            for (const e of (emailRows || [])) {
+                const tid = e.threadId || `${e.sender}__${e.receiver}`;
+                if (!threads[tid]) threads[tid] = e; // first = most recent (desc order)
+            }
+
+            const pendingEmails = [];
+            for (const last of Object.values(threads)) {
+                const empEmail = (employee.emailId || '').toLowerCase().trim();
+                const senderEmail = (last.sender || '').toLowerCase().trim();
+                if (empEmail && senderEmail && senderEmail !== empEmail) {
+                    const waitMs = Date.now() - new Date(last.created_at).getTime();
+                    pendingEmails.push({
+                        id:          last.id,
+                        channel:     'email',
+                        from:        last.sender,
+                        preview:     (last.message || '').replace(/\s+/g, ' ').trim().slice(0, 140),
+                        waitMinutes: Math.floor(waitMs / 60000),
+                        createdAt:   last.created_at,
+                    });
+                }
+            }
+            // Sort most urgent first
+            pendingEmails.sort((a, b) => b.waitMinutes - a.waitMinutes);
+
+            // ── 2. Open KG commitments ───────────────────────────────────────
+            // PROMISED / QUOTED / DEADLINE / DELIVERS edges where this employee
+            // is one of the participants.
+            const { data: empNode } = await this.client
+                .from('nodes')
+                .select('id')
+                .eq('name', employee.Name)
+                .maybeSingle();
+
+            let commitments = [];
+            if (empNode) {
+                const { data: edges } = await this.client
+                    .from('edges')
+                    .select(`
+                        id, relationship_type, properties, created_at,
+                        from_node:from_node_id(id, name, type),
+                        to_node:to_node_id(id, name, type)
+                    `)
+                    .or(`from_node_id.eq.${empNode.id},to_node_id.eq.${empNode.id}`)
+                    .in('relationship_type', ['PROMISED', 'QUOTED', 'DEADLINE', 'DELIVERS', 'MENTIONS'])
+                    .order('created_at', { ascending: false })
+                    .limit(30);
+
+                commitments = (edges || []).map(e => {
+                    const waitMs = Date.now() - new Date(e.created_at).getTime();
+                    return {
+                        id:               e.id,
+                        channel:          'graph',
+                        relationshipType: e.relationship_type,
+                        from:             e.from_node?.name,
+                        fromType:         e.from_node?.type,
+                        to:               e.to_node?.name,
+                        toType:           e.to_node?.type,
+                        messageText:      (e.properties?.message_text || '').slice(0, 140),
+                        waitMinutes:      Math.floor(waitMs / 60000),
+                        createdAt:        e.created_at,
+                    };
+                });
+            }
+
+            return { emails: pendingEmails, commitments };
+        } catch (err) {
+            console.error('❌ getPendingFollowups failed:', err.message);
+            return { emails: [], commitments: [] };
+        }
+    }
+
     async getEmployeeByEmail(email) {
         if (!this.client || !email) return null;
         try {
