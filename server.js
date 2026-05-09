@@ -26,10 +26,19 @@ async function requireAuth(req, res, next) {
     }
 }
 
-// In-memory state for WhatsApp (Microservice reporting)
-const whatsappSessions = {};
-
 // Auth Endpoints
+// In-memory cooldown: track last confirmation email sent per address (60-second window)
+const emailCooldowns = {};
+function isRateLimitError(msg = '') {
+    return /rate.?limit|too many|over.*limit/i.test(msg);
+}
+function isSmtpError(msg = '') {
+    return /sending confirmation|smtp|email.*send|send.*email/i.test(msg);
+}
+function isAlreadyRegisteredError(msg = '') {
+    return /security purposes|only request this after|already registered|user already exists/i.test(msg);
+}
+
 app.post('/api/auth/register', async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
@@ -39,7 +48,19 @@ app.post('/api/auth/register', async (req, res) => {
             auth: { persistSession: false, autoRefreshToken: false }
         });
         const { data, error } = await tempClient.auth.signUp({ email, password });
-        if (error) return res.status(400).json({ error: error.message });
+        if (error) {
+            if (isAlreadyRegisteredError(error.message)) {
+                return res.status(409).json({ error: 'ALREADY_REGISTERED' });
+            }
+            if (isRateLimitError(error.message)) {
+                return res.status(429).json({ error: 'EMAIL_RATE_LIMIT' });
+            }
+            if (isSmtpError(error.message)) {
+                return res.status(502).json({ error: 'EMAIL_SMTP_MISCONFIGURED' });
+            }
+            return res.status(400).json({ error: error.message });
+        }
+        emailCooldowns[email] = Date.now();
         res.json({ success: true, needsConfirmation: !data.session });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -67,6 +88,55 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+app.post('/api/auth/resend-confirmation', async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
+
+    // Enforce 60-second client-side cooldown before hitting Supabase again
+    const lastSent = emailCooldowns[email] || 0;
+    const secondsLeft = Math.ceil((60000 - (Date.now() - lastSent)) / 1000);
+    if (secondsLeft > 0) {
+        return res.status(429).json({ error: 'EMAIL_RATE_LIMIT', secondsLeft });
+    }
+
+    try {
+        const { createClient } = require('@supabase/supabase-js');
+        const tempClient = createClient(config.SUPABASE_URL, config.SUPABASE_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false }
+        });
+        const { error } = await tempClient.auth.resend({ type: 'signup', email });
+        if (error) {
+            if (isRateLimitError(error.message)) {
+                return res.status(429).json({ error: 'EMAIL_RATE_LIMIT' });
+            }
+            return res.status(400).json({ error: error.message });
+        }
+        emailCooldowns[email] = Date.now();
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/auth/refresh', async (req, res) => {
+    const { refresh_token } = req.body;
+    if (!refresh_token) return res.status(400).json({ error: 'refresh_token required' });
+    try {
+        const { createClient } = require('@supabase/supabase-js');
+        const tempClient = createClient(config.SUPABASE_URL, config.SUPABASE_KEY, {
+            auth: { persistSession: false, autoRefreshToken: false }
+        });
+        const { data, error } = await tempClient.auth.refreshSession({ refresh_token });
+        if (error || !data.session) return res.status(401).json({ error: 'Refresh failed — please log in again.' });
+        res.json({
+            access_token:  data.session.access_token,
+            refresh_token: data.session.refresh_token,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 app.get('/api/auth/me', async (req, res) => {
     const token = req.headers.authorization?.replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Unauthorized' });
@@ -80,43 +150,114 @@ app.get('/api/auth/me', async (req, res) => {
     }
 });
 
-// WhatsApp Status Endpoints (for UI and WhatsApp Service)
-app.get('/api/whatsapp/status', (req, res) => {
-    const { employeeId } = req.query;
-    if (employeeId) {
-        return res.json(whatsappSessions[employeeId] || { connected: false, qr: null });
-    }
-    res.json(whatsappSessions);
-});
+// ─── WhatsApp (Baileys multi-tenant, in-process) ──────────────────────────────
+// The feeder runs in this same Node process — call its sessionManager directly.
+const { sessionManager: waSessions } = require('wa-field-tracker-feeder-whatsapp');
 
-app.post('/api/whatsapp/update-status', requireAuth, (req, res) => {
-    const { employeeId = 'default', connected, qr } = req.body;
-    whatsappSessions[employeeId] = {
-        connected: !!connected,
-        qr: qr || null,
-        lastUpdate: new Date().toISOString()
-    };
-    console.log(`📱 WhatsApp Status [${employeeId}]: ${connected ? 'Connected' : 'Disconnected (QR: ' + (qr ? 'Present' : 'None') + ')'}`);
-    res.json({ success: true });
-});
-
-app.post('/api/whatsapp/start-session', async (req, res) => {
+app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     const { employeeId } = req.body;
-    if (!employeeId) return res.status(400).json({ error: 'Missing employeeId' });
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    waSessions.startSession(Number(employeeId)).catch(err =>
+        console.error(`startSession ${employeeId}:`, err.message)
+    );
+    res.json({ ok: true });
+});
 
+app.get('/api/whatsapp/status', requireAuth, (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    res.json(waSessions.getStatus(employeeId));
+});
+
+app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
+    const { employeeId } = req.body;
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        // Forward request to WhatsApp microservice (listening on 3001)
-        const response = await fetch('http://localhost:3001/api/sessions/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ employeeId })
-        });
-        const result = await response.json();
-        res.json(result);
+        await waSessions.disconnect(Number(employeeId));
+        res.json({ ok: true });
     } catch (err) {
-        console.error('❌ Failed to start WhatsApp session:', err.message);
-        res.status(500).json({ error: 'Failed to communicate with WhatsApp service' });
+        res.status(500).json({ error: err.message });
     }
+});
+
+app.get('/api/whatsapp/groups', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        res.json(await waSessions.listGroups(employeeId));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/whatsapp/contacts', requireAuth, (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    res.json(waSessions.listContacts(employeeId));
+});
+
+// Manually add a contact by phone number (resolves JID without relying on contact-sync cache)
+app.post('/api/whatsapp/contacts/resolve', requireAuth, async (req, res) => {
+    const { employeeId, phone } = req.body;
+    if (!employeeId || !phone) return res.status(400).json({ error: 'employeeId and phone required' });
+    try {
+        const results = await waSessions.resolvePhone(Number(employeeId), phone);
+        res.json(results);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/whatsapp/tracked', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        res.json(await waSessions.listTracked(employeeId));
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/whatsapp/track', requireAuth, async (req, res) => {
+    const { employeeId, jid, displayName, chatType = 'group' } = req.body;
+    if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
+    try {
+        await waSessions.trackChat(Number(employeeId), jid, displayName, chatType);
+        const tracked = await waSessions.listTracked(Number(employeeId));
+        res.json({ ok: true, trackedCount: tracked.length });
+    } catch (err) {
+        console.error(`/track failed for emp ${employeeId}, jid ${jid}:`, err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/whatsapp/track', requireAuth, async (req, res) => {
+    const { employeeId, jid } = req.body;
+    if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
+    try {
+        await waSessions.untrackChat(Number(employeeId), jid);
+        res.json({ ok: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Per-chat message viewers (read directly from Supabase — no feeder hop).
+app.get('/api/whatsapp/messages', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    const jid        = req.query.jid;
+    const limit      = Math.min(Number(req.query.limit) || 200, 1000);
+    const after      = req.query.after || null;  // ISO timestamp — return only rows newer than this
+    if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
+    const messages = await supabaseService.getWhatsAppMessages(employeeId, jid, limit, after);
+    res.json(messages);
+});
+
+app.get('/api/whatsapp/chat-summaries', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    const summaries = await supabaseService.getWhatsAppChatSummaries(employeeId);
+    res.json(summaries);
 });
 
 
@@ -177,7 +318,7 @@ app.get('/api/graph/context', requireAuth, async (req, res) => {
 });
 
 // Pending follow-ups for an employee (email threads + KG commitments)
-app.get('/api/followups', async (req, res) => {
+app.get('/api/followups', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     const data = await supabaseService.getPendingFollowups(employeeId);
@@ -208,6 +349,34 @@ app.post('/api/graph/enrich', async (req, res) => {
         res.json({ success: true, processed: emails.length });
     } catch (err) {
         console.error('❌ /api/graph/enrich error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Enrich knowledge graph from employee's WhatsApp message history
+app.post('/api/graph/enrich-whatsapp', async (req, res) => {
+    const { employeeId, employeeName } = req.body;
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        const { intelligenceService } = require('./core');
+        const messages = await supabaseService.getWhatsAppMessagesForEnrichment(employeeId, 30);
+
+        if (messages.length === 0) {
+            return res.json({ success: true, processed: 0 });
+        }
+
+        let logBlob = `--- WHATSAPP HISTORY FOR: ${employeeName || 'Employee'} ---\n\n`;
+        messages.forEach(m => {
+            logBlob += `[WHATSAPP] Chat: ${m.chatJid || ''} | From: ${m.senderName || m.senderNumber || ''}\nContent: ${m.description || ''}\n\n`;
+        });
+
+        await intelligenceService.processMessageForGraph(logBlob, {
+            messageId: `WA-ENRICH-${employeeId}-${Date.now()}`
+        });
+
+        res.json({ success: true, processed: messages.length });
+    } catch (err) {
+        console.error('❌ /api/graph/enrich-whatsapp error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
@@ -272,6 +441,116 @@ app.post('/api/agent/upload', requireAuth, upload.single('document'), async (req
         res.json({ success: true, message: 'Document parsed and knowledge map updated.' });
     } catch (err) {
         console.error('❌ Document upload error:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── Contact Identity Endpoints ──────────────────────────────────────────────
+// Links a WhatsApp phone number to an email address so the graph can unify them.
+
+app.get('/api/contacts/identities', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    const links = await supabaseService.getContactIdentities(employeeId);
+    res.json(links);
+});
+
+app.post('/api/contacts/identities', requireAuth, async (req, res) => {
+    const { employeeId, phone, email, displayName } = req.body;
+    if (!employeeId || !phone || !email) {
+        return res.status(400).json({ error: 'employeeId, phone and email required' });
+    }
+    const link = await supabaseService.linkContactIdentity(employeeId, phone, email, displayName);
+    if (link) res.status(201).json(link);
+    else res.status(500).json({ error: 'Failed to link contact identity' });
+});
+
+app.delete('/api/contacts/identities/:id', requireAuth, async (req, res) => {
+    const id         = Number(req.params.id);
+    const employeeId = Number(req.query.employeeId);
+    if (!id || !employeeId) return res.status(400).json({ error: 'id and employeeId required' });
+    const ok = await supabaseService.deleteContactIdentity(id, employeeId);
+    if (ok) res.json({ success: true });
+    else res.status(500).json({ error: 'Failed to remove identity link' });
+});
+
+// Client Endpoints
+app.get('/api/clients', requireAuth, async (req, res) => {
+    const clients = await supabaseService.getAllClients();
+    res.json(clients);
+});
+
+app.post('/api/clients', requireAuth, async (req, res) => {
+    const { businessName, location, description, emailId, contacts, managedBy } = req.body;
+    if (!businessName) return res.status(400).json({ error: 'businessName is required' });
+    if (!managedBy)    return res.status(400).json({ error: 'managedBy (employeeId) is required' });
+    const client = await supabaseService.createClient({ businessName, location, description, emailId, contacts, managedBy });
+    if (client) res.status(201).json(client);
+    else res.status(500).json({ error: 'Failed to create client' });
+});
+
+app.patch('/api/clients/:id/assign', requireAuth, async (req, res) => {
+    const clientId = Number(req.params.id);
+    const { managedBy } = req.body;
+    if (!clientId || !managedBy) return res.status(400).json({ error: 'clientId and managedBy are required' });
+    const ok = await supabaseService.updateClientManagedBy(clientId, managedBy);
+    if (ok) res.json({ success: true });
+    else res.status(500).json({ error: 'Failed to assign client' });
+});
+
+// IMAP Endpoints
+app.post('/api/imap/test', requireAuth, async (req, res) => {
+    const { host, port, secure, user, pass } = req.body;
+    if (!host || !user || !pass) return res.status(400).json({ error: 'host, user and pass are required' });
+    try {
+        const { ImapFlow } = require('imapflow');
+        const client = new ImapFlow({
+            host,
+            port:   port  || 993,
+            secure: secure !== false,
+            auth:   { user, pass },
+            logger: false,
+            tls:    { rejectUnauthorized: false },
+        });
+        await client.connect();
+        await client.logout();
+        res.json({ success: true });
+    } catch (err) {
+        res.status(400).json({ error: `Connection failed: ${err.message}` });
+    }
+});
+
+app.post('/api/imap/connect', requireAuth, async (req, res) => {
+    const { employeeId, host, port, secure, user, pass } = req.body;
+    if (!employeeId || !host || !user || !pass) {
+        return res.status(400).json({ error: 'employeeId, host, user and pass are required' });
+    }
+    try {
+        const credentials = { host, port: port || 993, secure: secure !== false, user, pass };
+        const saved = await supabaseService.saveEmployeeToken(employeeId, 'imap', credentials);
+        if (!saved) return res.status(500).json({ error: 'Failed to save IMAP credentials' });
+        await supabaseService.toggleIntegration(employeeId, 'imap', true);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.delete('/api/imap/disconnect', requireAuth, async (req, res) => {
+    const { employeeId } = req.body;
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    const ok = await supabaseService.removeEmployeeSecret(employeeId, 'imap');
+    res.json({ success: ok });
+});
+
+app.get('/api/imap/status', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        const records = await supabaseService.getAuthenticatedEmployees('imap');
+        const connected = records.some(r => r.employee_id === employeeId);
+        res.json({ connected });
+    } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });

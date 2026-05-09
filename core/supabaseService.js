@@ -408,6 +408,149 @@ class SupabaseService {
         }
     }
 
+    // Messages for one tracked WhatsApp chat (by JID), most recent first.
+    // Two-step fetch: WhatsApp metadata + messages bodies, joined in JS.
+    // Avoids PostgREST schema-cache dependency on the FK relationship.
+    async getWhatsAppMessages(employeeId, chatJid, limit = 200, after = null) {
+        if (!this.client || !employeeId || !chatJid) return [];
+        try {
+            let query = this.client
+                .from('Whatsapp')
+                .select('id, created_at, messageTraceId, chatJid, senderName, senderNumber')
+                .eq('employeeID', employeeId)
+                .eq('chatJid', chatJid)
+                .order('created_at', { ascending: after ? true : false })
+                .limit(limit);
+            if (after) query = query.gt('created_at', after);
+            const { data: waRows, error: waErr } = await query;
+            if (waErr) throw waErr;
+            if (!waRows || waRows.length === 0) return [];
+
+            const traceIds = [...new Set(waRows.map(r => r.messageTraceId).filter(Boolean))];
+            const msgMap = {};
+            if (traceIds.length > 0) {
+                const { data: msgs, error: mErr } = await this.client
+                    .from('messages')
+                    .select('messageTraceId, description, messageType, mediaUrl')
+                    .in('messageTraceId', traceIds);
+                if (mErr) throw mErr;
+                (msgs || []).forEach(m => { msgMap[m.messageTraceId] = m; });
+            }
+
+            const merged = waRows.map(r => {
+                const body = msgMap[r.messageTraceId] || {};
+                return {
+                    id:             r.id,
+                    created_at:     r.created_at,
+                    messageTraceId: r.messageTraceId,
+                    chatJid:        r.chatJid,
+                    senderName:     r.senderName,
+                    senderNumber:   r.senderNumber,
+                    description:    body.description || '',
+                    messageType:    body.messageType || 'Text',
+                    mediaUrl:       body.mediaUrl    || null,
+                };
+            });
+            // Full load comes back newest-first and needs reversing; incremental poll is already ascending
+            return after ? merged : merged.reverse();
+        } catch (err) {
+            console.error('❌ getWhatsAppMessages failed:', err.message);
+            return [];
+        }
+    }
+
+    // Flat list of recent WA messages across all chats — used for graph enrichment.
+    async getWhatsAppMessagesForEnrichment(employeeId, days = 30) {
+        if (!this.client || !employeeId) return [];
+        try {
+            const since = new Date();
+            since.setDate(since.getDate() - days);
+
+            const { data: waRows, error: waErr } = await this.client
+                .from('Whatsapp')
+                .select('chatJid, senderName, senderNumber, messageTraceId, created_at')
+                .eq('employeeID', employeeId)
+                .gte('created_at', since.toISOString())
+                .order('created_at', { ascending: true })
+                .limit(500);
+            if (waErr) throw waErr;
+            if (!waRows || waRows.length === 0) return [];
+
+            const traceIds = [...new Set(waRows.map(r => r.messageTraceId).filter(Boolean))];
+            const msgMap = {};
+            if (traceIds.length > 0) {
+                const { data: msgs, error: mErr } = await this.client
+                    .from('messages')
+                    .select('messageTraceId, description')
+                    .in('messageTraceId', traceIds);
+                if (mErr) throw mErr;
+                (msgs || []).forEach(m => { msgMap[m.messageTraceId] = m.description; });
+            }
+
+            return waRows.map(r => ({
+                chatJid:      r.chatJid,
+                senderName:   r.senderName,
+                senderNumber: r.senderNumber,
+                description:  msgMap[r.messageTraceId] || '',
+                created_at:   r.created_at,
+            })).filter(r => r.description);
+        } catch (err) {
+            console.error('❌ getWhatsAppMessagesForEnrichment failed:', err.message);
+            return [];
+        }
+    }
+
+    // Aggregate counts + last-message metadata per tracked chat for an employee.
+    async getWhatsAppChatSummaries(employeeId) {
+        if (!this.client || !employeeId) return [];
+        try {
+            const { data: waRows, error: waErr } = await this.client
+                .from('Whatsapp')
+                .select('chatJid, senderName, messageTraceId, created_at')
+                .eq('employeeID', employeeId)
+                .not('chatJid', 'is', null)
+                .order('created_at', { ascending: false })
+                .limit(2000);
+            if (waErr) throw waErr;
+            if (!waRows || waRows.length === 0) return [];
+
+            // Find the latest messageTraceId per chat for the preview text.
+            const latestPerChat = {};
+            for (const row of waRows) {
+                if (!latestPerChat[row.chatJid]) latestPerChat[row.chatJid] = row;
+            }
+            const previewTraceIds = Object.values(latestPerChat).map(r => r.messageTraceId).filter(Boolean);
+
+            const previewMap = {};
+            if (previewTraceIds.length > 0) {
+                const { data: msgs, error: mErr } = await this.client
+                    .from('messages')
+                    .select('messageTraceId, description')
+                    .in('messageTraceId', previewTraceIds);
+                if (mErr) throw mErr;
+                (msgs || []).forEach(m => { previewMap[m.messageTraceId] = m.description; });
+            }
+
+            const summary = {};
+            for (const row of waRows) {
+                if (!summary[row.chatJid]) {
+                    summary[row.chatJid] = {
+                        chatJid:       row.chatJid,
+                        lastMessage:   previewMap[row.messageTraceId] || '',
+                        lastSender:    row.senderName,
+                        lastTimestamp: row.created_at,
+                        count:         0,
+                    };
+                }
+                summary[row.chatJid].count += 1;
+            }
+            return Object.values(summary);
+        } catch (err) {
+            console.error('❌ getWhatsAppChatSummaries failed:', err.message);
+            return [];
+        }
+    }
+
     async getEmailsByEmployeeId(employeeId, days = 5) {
         if (!this.client) return [];
         try {
@@ -560,23 +703,20 @@ class SupabaseService {
     // --- SECURED VAULT OPERATIONS (Supabase Vault Schema) ---
 
     async saveEmployeeToken(employeeId, provider, tokenData) {
-        if (!this.client || provider !== 'gmail') return null;
+        if (!this.client) return null;
         try {
-            console.log(`🔐 Vault: Encrypting credentials for Employee ${employeeId}...`);
-            const secretName = `gmail_token_${employeeId}`;
+            console.log(`🔐 Vault: Saving ${provider} credentials for Employee ${employeeId}...`);
             const { error } = await this.client
-                .from('omnibrain_vault.secrets')
-                .upsert({
-                    name: secretName,
-                    secret_json: tokenData,
-                    description: 'gmail'
-                }, { onConflict: 'name' });
-
+                .from('vault_credentials')
+                .upsert(
+                    { employee_id: employeeId, provider, token_data: tokenData },
+                    { onConflict: 'employee_id,provider' }
+                );
             if (error) throw error;
-            console.log(`✅ Vault: Secret locked for Employee ${employeeId}.`);
+            console.log(`✅ Vault: ${provider} credentials saved for Employee ${employeeId}.`);
             return true;
         } catch (err) {
-            console.error(`❌ Vault RPC Error:`, err.message);
+            console.error(`❌ Vault Error:`, err.message);
             return null;
         }
     }
@@ -598,31 +738,14 @@ class SupabaseService {
     }
 
     async getAuthenticatedEmployees(provider = 'gmail') {
-        if (!this.client || provider !== 'gmail') return [];
+        if (!this.client) return [];
         try {
-            // First get all secrets
-            const { data: secrets, error } = await this.client.rpc('get_all_gmail_secrets');
-            if (error) throw error;
-            
-            // Then get enabled status for this provider
-            const { data: statuses } = await this.client
-                .from('employee_integrations')
-                .select('employee_id, is_enabled')
+            const { data, error } = await this.client
+                .from('vault_credentials')
+                .select('employee_id, token_data')
                 .eq('provider', provider);
-
-            const enabledMap = {};
-            if (statuses) {
-                statuses.forEach(s => enabledMap[s.employee_id] = s.is_enabled);
-            }
-
-            // Filter only those who are enabled (default to enabled if record missing, or disabled? User said "only if enabled")
-            // To be safe, we'll assume they must explicitly have it enabled or we auto-enable upon connect.
-            return secrets
-                .filter(record => enabledMap[record.employee_id] !== false) // Default true if status entry missing
-                .map(record => ({
-                    employee_id: record.employee_id,
-                    token_data: record.token_data
-                }));
+            if (error) throw error;
+            return data || [];
         } catch (err) {
             console.error(`❌ Vault Retrieval Error:`, err.message);
             return [];
@@ -647,21 +770,17 @@ class SupabaseService {
     }
 
     async removeEmployeeSecret(employeeId, provider = 'gmail') {
-        if (!this.client || provider !== 'gmail') return false;
+        if (!this.client) return false;
         try {
-            const secretName = `gmail_token_${employeeId}`;
-            console.log(`🗑️ Vault: Removing ${provider} secrets for Employee ${employeeId}...`);
+            console.log(`🗑️ Vault: Removing ${provider} credentials for Employee ${employeeId}...`);
             const { error } = await this.client
-                .from('omnibrain_vault.secrets')
+                .from('vault_credentials')
                 .delete()
-                .eq('name', secretName);
-
+                .eq('employee_id', employeeId)
+                .eq('provider', provider);
             if (error) throw error;
-            
-            // Also disable the integration status record
             await this.toggleIntegration(employeeId, provider, false);
-            
-            console.log(`✅ Vault: Secrets cleared for Employee ${employeeId}.`);
+            console.log(`✅ Vault: ${provider} credentials cleared for Employee ${employeeId}.`);
             return true;
         } catch (err) {
             console.error(`❌ Vault Removal Error:`, err.message);
@@ -949,6 +1068,53 @@ class SupabaseService {
             return null;
         }
     }
+
+    async getAllClients() {
+        if (!this.client) return [];
+        try {
+            const { data, error } = await this.client
+                .from('clients')
+                .select('id, businessName, location, description, emailId, managedBy, created_at')
+                .order('businessName');
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ getAllClients failed:', err.message);
+            return [];
+        }
+    }
+
+    async createClient(clientData) {
+        if (!this.client) return null;
+        try {
+            const { data, error } = await this.client
+                .from('clients')
+                .insert([clientData])
+                .select()
+                .single();
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ createClient failed:', err.message);
+            return null;
+        }
+    }
+
+    async updateClientManagedBy(clientId, employeeId) {
+        if (!this.client) return false;
+        try {
+            const { error } = await this.client
+                .from('clients')
+                .update({ managedBy: employeeId })
+                .eq('id', clientId);
+            if (error) throw error;
+            return true;
+        } catch (err) {
+            console.error('❌ updateClientManagedBy failed:', err.message);
+            return false;
+        }
+    }
+
     async upsertSupplier(supplierName, properties = {}) {
         if (!this.client) return null;
         try {
@@ -1033,6 +1199,101 @@ class SupabaseService {
         } catch (err) {
             console.error(`❌ upsertProduct failed for ${productName}:`, err.message);
             return null;
+        }
+    }
+
+    // ── Identity resolution — links phone ↔ email per employee ─────────────────
+
+    async linkContactIdentity(employeeId, phone, email, displayName) {
+        if (!this.client || !employeeId || !phone || !email) return null;
+        const normalizedPhone = phone.replace(/\D/g, '');
+        try {
+            const { data, error } = await this.client
+                .from('contact_identities')
+                .upsert(
+                    { employee_id: employeeId, phone: normalizedPhone, email, display_name: displayName || null },
+                    { onConflict: 'employee_id,phone' }
+                )
+                .select()
+                .single();
+            if (error) throw error;
+            return data;
+        } catch (err) {
+            console.error('❌ linkContactIdentity failed:', err.message);
+            return null;
+        }
+    }
+
+    async getContactIdentities(employeeId) {
+        if (!this.client || !employeeId) return [];
+        try {
+            const { data, error } = await this.client
+                .from('contact_identities')
+                .select('id, phone, email, display_name, created_at')
+                .eq('employee_id', employeeId)
+                .order('display_name');
+            if (error) throw error;
+            return data || [];
+        } catch (err) {
+            console.error('❌ getContactIdentities failed:', err.message);
+            return [];
+        }
+    }
+
+    async deleteContactIdentity(id, employeeId) {
+        if (!this.client || !id || !employeeId) return false;
+        try {
+            const { error } = await this.client
+                .from('contact_identities')
+                .delete()
+                .eq('id', id)
+                .eq('employee_id', employeeId);
+            if (error) throw error;
+            return true;
+        } catch (err) {
+            console.error('❌ deleteContactIdentity failed:', err.message);
+            return false;
+        }
+    }
+
+    // Resolve a phone number to a known email identity for graph merging.
+    async resolvePhoneToEmail(employeeId, phone) {
+        if (!this.client || !employeeId || !phone) return null;
+        const normalizedPhone = phone.replace(/\D/g, '');
+        try {
+            const { data, error } = await this.client
+                .from('contact_identities')
+                .select('email, display_name')
+                .eq('employee_id', employeeId)
+                .eq('phone', normalizedPhone)
+                .maybeSingle();
+            if (error) return null;
+            return data || null;
+        } catch {
+            return null;
+        }
+    }
+
+    async markKnowledgeMapDirty(employeeId) {
+        if (!this.client || !employeeId) return;
+        try {
+            const { data: existing } = await this.client
+                .from('knowledge_maps')
+                .select('id')
+                .eq('employee_id', employeeId)
+                .maybeSingle();
+            if (existing) {
+                await this.client
+                    .from('knowledge_maps')
+                    .update({ is_dirty: true, updated_at: new Date().toISOString() })
+                    .eq('id', existing.id);
+            } else {
+                await this.client
+                    .from('knowledge_maps')
+                    .insert([{ employee_id: employeeId, is_dirty: true, knowledge_map: {} }]);
+            }
+        } catch (err) {
+            console.error(`❌ markKnowledgeMapDirty failed for ${employeeId}:`, err.message);
         }
     }
 

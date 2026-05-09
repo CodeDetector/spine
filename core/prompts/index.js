@@ -1,5 +1,7 @@
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
+
+const relevanceTemplate = fs.readFileSync(path.join(__dirname, 'relevance_check.md'), 'utf-8');
 
 const screeningTemplate = fs.readFileSync(path.join(__dirname, 'screening.md'), 'utf-8');
 const leaveTemplate = fs.readFileSync(path.join(__dirname, 'leave_extraction.md'), 'utf-8');
@@ -54,6 +56,10 @@ const graphExtractionPrompt = (messageText) => {
     return graphTemplate.replace(/{{messageText}}/g, messageText);
 };
 
+const relevanceCheckPrompt = (emailText) => {
+    return relevanceTemplate.replace(/{{emailText}}/g, emailText);
+};
+
 module.exports = {
     screeningPrompt,
     leaveExtractionPrompt,
@@ -61,5 +67,6 @@ module.exports = {
     visitExtractionPrompt,
     managerScreeningReportPrompt,
     employeeScreeningReportPrompt,
-    graphExtractionPrompt
+    graphExtractionPrompt,
+    relevanceCheckPrompt,
 };

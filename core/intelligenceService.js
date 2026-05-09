@@ -1,6 +1,6 @@
 const { GoogleGenAI } = require('@google/genai');
 const config = require('./config');
-const { graphExtractionPrompt } = require('./prompts');
+const { graphExtractionPrompt, relevanceCheckPrompt } = require('./prompts');
 const supabaseService = require('./supabaseService');
 
 class IntelligenceService {
@@ -141,6 +141,27 @@ class IntelligenceService {
             }
         }
     }
+    // ── Business relevance gate ─────────────────────────────────────────────
+    // Returns a score 0-100. Callers use >80 as the threshold for graph ingestion.
+    async scoreEmailRelevance(emailText) {
+        if (!this.genAI) return 100; // fail-open if AI not configured
+        try {
+            const prompt = relevanceCheckPrompt(emailText);
+            const result = await this.genAI.models.generateContent({
+                model: 'gemma-4-31b-it',
+                contents: [{ role: 'user', parts: [{ text: prompt }] }],
+            });
+            const raw = result.text.replace(/```json|```/g, '').trim();
+            const parsed = JSON.parse(raw);
+            const score = Number(parsed.score);
+            console.log(`📊 Email relevance score: ${score} — ${parsed.reason}`);
+            return isNaN(score) ? 0 : score;
+        } catch (err) {
+            console.warn('⚠️  scoreEmailRelevance failed, defaulting to 0:', err.message);
+            return 0;
+        }
+    }
+
     // ── In-memory chat sessions ──────────────────────────────────────────────
     // Map<sessionId, { turns: [{role, text}], lastActive: Date }>
     // Sessions older than 2 hours are purged automatically.
