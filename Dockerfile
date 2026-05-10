@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install
+RUN npm install --verbose
 
 COPY . .
 
