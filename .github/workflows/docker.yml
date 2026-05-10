@@ -21,4 +21,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: codedetector/wa-field-tracker:latest
+          tags: dhruvsharma983/wa-field-tracker:latest

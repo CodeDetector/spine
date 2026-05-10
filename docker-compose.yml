@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   omni-email:
-    image: codedetector/map-my-email:latest
+    image: dhruvsharma983/map-my-email:latest
     container_name: omni-email
     env_file: .env
     restart: unless-stopped
@@ -10,7 +10,7 @@ services:
       - omni-network
 
   omni-whatsapp:
-    image: codedetector/map-my-whatsapp:latest
+    image: dhruvsharma983/map-my-whatsapp:latest
     container_name: omni-whatsapp
     ports:
       - "3001:3001"
@@ -20,7 +20,7 @@ services:
       - omni-network
 
   omni-backend:
-    image: codedetector/wa-field-tracker:latest
+    image: dhruvsharma983/wa-field-tracker:latest
     container_name: omni-backend
     ports:
       - "3000:3000"
@@ -33,7 +33,7 @@ services:
       - omni-network
 
   omni-ui:
-    image: codedetector/wa-field-tracker-ui:latest
+    image: dhruvsharma983/wa-field-tracker-ui:latest
     container_name: omni-ui
     ports:
       - "80:80"
