@@ -1,27 +1,28 @@
 # Docker Deployment Design
 
 **Date:** 2026-05-10  
-**Scope:** Dockerize 3 backend services (mapMyEmail, mapMyWhatsapp, wa-field-tracker) with GitHub Actions CI and a single docker-compose in wa-field-tracker.
+**Scope:** Dockerize 4 services (mapMyEmail, mapMyWhatsapp, wa-field-tracker, wa-field-tracker-ui) with GitHub Actions CI and a single docker-compose in wa-field-tracker.
 
 ---
 
 ## Overview
 
-Each backend service is packaged as an independent Docker image, built and pushed to Docker Hub automatically via GitHub Actions on every push to `main`. The `wa-field-tracker` repo serves as the deployment hub — it contains the `docker-compose.yml` that pulls all 3 images and runs them as a coordinated stack.
+Each service is packaged as an independent Docker image, built and pushed to Docker Hub automatically via GitHub Actions on every push to `main`. The `wa-field-tracker` repo serves as the deployment hub — it contains the `docker-compose.yml` that pulls all 4 images and runs them as a coordinated stack.
 
-`wa-field-tracker-ui` (React/Vite frontend) is deployed separately on Vercel and is out of scope for this design.
+The UI (`wa-field-tracker-ui`) is built as static files via `vite build` and served by nginx on port 80. nginx also proxies `/api` requests to the `omni-backend` container.
 
 ---
 
 ## Services
 
-| Service | Repo | Docker Hub Image | Exposed Port | Entry Command |
+| Service | Repo | Docker Hub Image | Exposed Port | Entry |
 |---|---|---|---|---|
 | Email feeder | `CodeDetector/mapMyEmail` | `codedetector/map-my-email:latest` | none (internal) | `npm start` |
 | WhatsApp feeder | `CodeDetector/mapMyWhatsapp` | `codedetector/map-my-whatsapp:latest` | `3001` | `npm start` |
 | Backend API | `CodeDetector/wa-field-tracker` | `codedetector/wa-field-tracker:latest` | `3000` | `npm start` |
+| Frontend UI | `CodeDetector/wa-field-tracker-ui` | `codedetector/wa-field-tracker-ui:latest` | `80` | nginx |
 
-All 3 containers share a Docker bridge network: `omni-network`.
+All 4 containers share a Docker bridge network: `omni-network`.
 
 ---
 
@@ -60,6 +61,50 @@ CMD ["npm", "start"]
 Notes:
 - `python3 make g++` are needed for native modules (e.g. `@whiskeysockets/baileys` uses native bindings)
 - `wa-field-tracker` already has this Dockerfile — it will be updated to use `npm start`
+
+---
+
+## Dockerfile (wa-field-tracker-ui)
+
+The UI repo gets a multi-stage `Dockerfile`:
+
+```dockerfile
+FROM node:20-slim AS builder
+
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+FROM nginx:alpine
+COPY --from=builder /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+```
+
+It also gets an `nginx.conf`:
+
+```nginx
+server {
+    listen 80;
+
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://omni-backend:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+The `vite.config.js` proxy (currently pointing to `localhost:3000`) is only used in dev mode — in production the nginx proxy handles it, so no change to `vite.config.js` is needed.
 
 ---
 
@@ -139,6 +184,17 @@ services:
     networks:
       - omni-network
 
+  omni-ui:
+    image: codedetector/wa-field-tracker-ui:latest
+    container_name: omni-ui
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - omni-backend
+    networks:
+      - omni-network
+
 networks:
   omni-network:
     driver: bridge
@@ -204,3 +260,6 @@ To redeploy after a code change: push to `main` on any service repo → GitHub A
 | `wa-field-tracker` | `docker-compose.yml` | Replace existing |
 | `wa-field-tracker` | `package.json` | Fix `file:` deps → `github:` |
 | `wa-field-tracker` | `.env.example` | Create |
+| `wa-field-tracker-ui` | `Dockerfile` | Create (multi-stage nginx) |
+| `wa-field-tracker-ui` | `nginx.conf` | Create |
+| `wa-field-tracker-ui` | `.github/workflows/docker.yml` | Create |
