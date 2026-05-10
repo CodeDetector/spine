@@ -1,83 +1,45 @@
 version: '3.8'
 
 services:
+  omni-email:
+    image: codedetector/map-my-email:latest
+    container_name: omni-email
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - omni-network
+
   omni-whatsapp:
-    build: .
+    image: codedetector/map-my-whatsapp:latest
     container_name: omni-whatsapp
-    command: cd mapMyWhatsapp && node index.js
     ports:
       - "3001:3001"
-    environment:
-      - WHATSAPP_API_TYPE=cloud
-      - WHATSAPP_ACCESS_TOKEN=${WHATSAPP_ACCESS_TOKEN}
-      - WHATSAPP_PHONE_NUMBER_ID=${WHATSAPP_PHONE_NUMBER_ID}
-      - WHATSAPP_BUSINESS_ACCOUNT_ID=${WHATSAPP_BUSINESS_ACCOUNT_ID}
-      - WHATSAPP_APP_SECRET=${WHATSAPP_APP_SECRET}
-      - WHATSAPP_WEBHOOK_VERIFY_TOKEN=${WHATSAPP_WEBHOOK_VERIFY_TOKEN}
-      - WHATSAPP_WEBHOOK_URL=${WHATSAPP_WEBHOOK_URL}
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - ALLOWED_GROUPS=${ALLOWED_GROUPS}
-      - ALLOW_PRIVATE_CHATS=${ALLOW_PRIVATE_CHATS}
-    volumes:
-      - ./.env:/app/.env
-      - ./gmail-tokens.json:/app/gmail-tokens.json
+    env_file: .env
     restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
     networks:
       - omni-network
 
-  omni-gmail:
-    build: .
-    container_name: omni-gmail
-    command: cd mapMyEmail && node index.js
-    environment:
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-    volumes:
-      - ./.env:/app/.env
-      - ./gmail-tokens.json:/app/gmail-tokens.json
-    restart: unless-stopped
-    depends_on:
-      - omni-whatsapp
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-    networks:
-      - omni-network
-
-  omni-dashboard:
-    build: .
-    container_name: omni-dashboard
-    command: cd wa-field-tracker && node server.js
+  omni-backend:
+    image: codedetector/wa-field-tracker:latest
+    container_name: omni-backend
     ports:
       - "3000:3000"
-    environment:
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_KEY=${SUPABASE_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-    volumes:
-      - ./.env:/app/.env
+    env_file: .env
     restart: unless-stopped
     depends_on:
+      - omni-email
       - omni-whatsapp
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+    networks:
+      - omni-network
+
+  omni-ui:
+    image: codedetector/wa-field-tracker-ui:latest
+    container_name: omni-ui
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - omni-backend
     networks:
       - omni-network
 
