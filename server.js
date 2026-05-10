@@ -26,6 +26,54 @@ async function requireAuth(req, res, next) {
     }
 }
 
+// ─── Proxy: business onboarding paths -> omni-business container ──────────────
+// JWT is validated here; the downstream service trusts the X-Internal-User-* headers
+// because omni-business is only reachable on the omni-network bridge (not exposed).
+const BUSINESS_SERVICE_URL = process.env.BUSINESS_SERVICE_URL || 'http://omni-business:3002';
+const BUSINESS_PROXY_PATHS = [
+    '/api/business/profile',
+    '/api/suppliers',
+    '/api/clients',                    // GET, POST (PATCH /:id/assign matched by prefix below)
+    '/api/employees/invite',           // future-proof if you rename
+    '/api/invitations',
+    '/api/onboarding/status',
+];
+
+async function proxyToBusinessService(req, res) {
+    try {
+        const url = `${BUSINESS_SERVICE_URL}${req.originalUrl}`;
+        const init = {
+            method: req.method,
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Internal-Service-Token': process.env.INTERNAL_SERVICE_TOKEN || '',
+                'X-Internal-User-Email': req.user.email,
+                'X-Internal-User-Id': req.user.id,
+            },
+        };
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+            init.body = JSON.stringify(req.body || {});
+        }
+        const upstream = await fetch(url, init);
+        const body = await upstream.text();
+        res.status(upstream.status);
+        const ct = upstream.headers.get('content-type');
+        if (ct) res.set('content-type', ct);
+        res.send(body);
+    } catch (err) {
+        console.error('proxyToBusinessService failed:', err.message);
+        res.status(502).json({ error: 'Business service unreachable' });
+    }
+}
+
+for (const p of BUSINESS_PROXY_PATHS) {
+    app.use(p, requireAuth, proxyToBusinessService);
+}
+
+// Special case: POST /api/employees is handled by mapMyBusiness (invite-gated registration),
+// but GET /api/employees stays here (it lists employees from the existing supabase service).
+app.post('/api/employees', requireAuth, proxyToBusinessService);
+
 // Auth Endpoints
 // In-memory cooldown: track last confirmation email sent per address (60-second window)
 const emailCooldowns = {};
@@ -144,7 +192,13 @@ app.get('/api/auth/me', async (req, res) => {
         const { data: { user }, error } = await supabaseService.client.auth.getUser(token);
         if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
         const employee = await supabaseService.getEmployeeByEmail(user.email);
-        res.json({ user: { id: user.id, email: user.email }, employee: employee || null });
+        const businessClient = require('./core/businessClient');
+        const onboarding = await businessClient.getOnboardingStatus();
+        res.json({
+            user: { id: user.id, email: user.email },
+            employee: employee || null,
+            onboarding,
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -267,19 +321,6 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     res.json(employees);
 });
 
-app.post('/api/employees', requireAuth, async (req, res) => {
-    const employeeData = req.body;
-    if (!employeeData.Name || !employeeData.Mobile) {
-        return res.status(400).json({ error: 'Name and Mobile are required' });
-    }
-    const newEmployee = await supabaseService.createEmployee(employeeData);
-    if (newEmployee) {
-        res.status(201).json(newEmployee);
-    } else {
-        res.status(500).json({ error: 'Failed to create employee' });
-    }
-});
-
 app.get('/api/stats', requireAuth, async (req, res) => {
     const stats = await supabaseService.getDashboardStats();
     res.json(stats);
@@ -394,17 +435,8 @@ app.post('/api/agent/chat', requireAuth, async (req, res) => {
     res.json(result);
 });
 
-// Business profile — persisted to data/business_profile.json
-app.get('/api/business/profile', requireAuth, (req, res) => {
-    const { profileService } = require('./core');
-    res.json(profileService.readProfile());
-});
-
-app.put('/api/business/profile', requireAuth, (req, res) => {
-    const { profileService } = require('./core');
-    const updated = profileService.writeProfile(req.body);
-    res.json(updated);
-});
+// Business profile, suppliers, employee invitations, onboarding status
+// are owned by the mapMyBusiness package (mounted near app initialization).
 
 // Knowledge-map chat — session memory held in-process on the backend
 app.post('/api/graph/chat', requireAuth, async (req, res) => {
@@ -474,29 +506,7 @@ app.delete('/api/contacts/identities/:id', requireAuth, async (req, res) => {
     else res.status(500).json({ error: 'Failed to remove identity link' });
 });
 
-// Client Endpoints
-app.get('/api/clients', requireAuth, async (req, res) => {
-    const clients = await supabaseService.getAllClients();
-    res.json(clients);
-});
-
-app.post('/api/clients', requireAuth, async (req, res) => {
-    const { businessName, location, description, emailId, contacts, managedBy } = req.body;
-    if (!businessName) return res.status(400).json({ error: 'businessName is required' });
-    if (!managedBy)    return res.status(400).json({ error: 'managedBy (employeeId) is required' });
-    const client = await supabaseService.createClient({ businessName, location, description, emailId, contacts, managedBy });
-    if (client) res.status(201).json(client);
-    else res.status(500).json({ error: 'Failed to create client' });
-});
-
-app.patch('/api/clients/:id/assign', requireAuth, async (req, res) => {
-    const clientId = Number(req.params.id);
-    const { managedBy } = req.body;
-    if (!clientId || !managedBy) return res.status(400).json({ error: 'clientId and managedBy are required' });
-    const ok = await supabaseService.updateClientManagedBy(clientId, managedBy);
-    if (ok) res.json({ success: true });
-    else res.status(500).json({ error: 'Failed to assign client' });
-});
+// Client endpoints are owned by the mapMyBusiness package.
 
 // IMAP Endpoints
 app.post('/api/imap/test', requireAuth, async (req, res) => {

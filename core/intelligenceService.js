@@ -200,9 +200,9 @@ class IntelligenceService {
 
         console.log(`🧠 Knowledge-Map Chat [${sessionId.slice(0, 8)}]: turn ${session.turns.length / 2 + 1}`);
 
-        const { formatProfileForPrompt } = require('./profileService');
-        const profile = require('./profileService').readProfile();
-        const profileBlock = formatProfileForPrompt(profile);
+        const businessClient = require('./businessClient');
+        const profile = await businessClient.readProfile();
+        const profileBlock = businessClient.formatProfileForPrompt(profile);
 
         const systemInstruction = `You are a business intelligence assistant helping the employee of this business understand their knowledge graph.
 ${profileBlock ? '\n' + profileBlock + '\n' : ''}

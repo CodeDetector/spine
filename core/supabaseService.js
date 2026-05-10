@@ -1355,6 +1355,9 @@ class SupabaseService {
             return false;
         }
     }
+
+    // Note: suppliers, clients (mutations), employee count, invitations, and
+    // onboarding status are owned by the wa-field-tracker-mapmybusiness package.
 }
 
 module.exports = new SupabaseService();

@@ -17,6 +17,14 @@ services:
     networks:
       - omni-network
 
+  omni-business:
+    image: dhruvsharma983/map-my-business:latest
+    container_name: omni-business
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - omni-network
+
   omni-backend:
     image: dhruvsharma983/wa-field-tracker:latest
     container_name: omni-backend
@@ -27,6 +35,7 @@ services:
     depends_on:
       - omni-email
       - omni-whatsapp
+      - omni-business
     networks:
       - omni-network
 

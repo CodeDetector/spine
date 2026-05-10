@@ -46,7 +46,6 @@ SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_anon_or_service_key
 GEMINI_API_KEY=your_gemini_api_key
 ALLOW_PRIVATE_CHATS=false
-ALLOWED_GROUP_NAMES=Group1,Group2
 ```
 
 ### 3. Database Setup
