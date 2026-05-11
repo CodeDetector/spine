@@ -74,6 +74,10 @@ for (const p of BUSINESS_PROXY_PATHS) {
 // but GET /api/employees stays here (it lists employees from the existing supabase service).
 app.post('/api/employees', requireAuth, proxyToBusinessService);
 
+// Health check — unauthenticated, used by docker-compose to gate omni-ui on
+// omni-backend being actually ready (not just started).
+app.get('/health', (req, res) => res.json({ ok: true, service: 'omni-backend' }));
+
 // Auth Endpoints
 // In-memory cooldown: track last confirmation email sent per address (60-second window)
 const emailCooldowns = {};
