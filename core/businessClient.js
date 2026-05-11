@@ -35,6 +35,14 @@ async function getOnboardingStatus() {
     }
 }
 
+async function getBusinessContext() {
+    try { return await call('/internal/business/context'); }
+    catch (err) {
+        console.error('businessClient.getBusinessContext:', err.message);
+        return { profile: null, suppliers: [], clients: [], employees: [] };
+    }
+}
+
 function formatProfileForPrompt(profile) {
     if (!profile) return '';
     const lines = [];
@@ -48,4 +56,4 @@ function formatProfileForPrompt(profile) {
     return ['=== Business Profile ===', ...lines, '========================'].join('\n');
 }
 
-module.exports = { readProfile, getOnboardingStatus, formatProfileForPrompt };
+module.exports = { readProfile, getOnboardingStatus, getBusinessContext, formatProfileForPrompt };

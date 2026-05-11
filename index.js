@@ -57,4 +57,8 @@ require('wa-field-tracker-feeder-imap').run();
 // 4. Management API & Dashboard Server
 require('./server');
 
+// 5. Refinement-agent worker — polls agent_jobs, dispatches to per-channel agents.
+const agentWorker = require('./core/agents/worker');
+agentWorker.start();
+
 console.log('✅ Omni-Brain Orchestrator is running.');

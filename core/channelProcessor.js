@@ -32,6 +32,7 @@
 
 const supabaseService    = require('./supabaseService');
 const intelligenceService = require('./intelligenceService');
+const { enqueue: enqueueAgentJob } = require('./agents/queue');
 
 const RELEVANCE_THRESHOLD = 80;
 
@@ -51,10 +52,26 @@ async function processEmail(payload, messageTraceId) {
     const score = await intelligenceService.scoreEmailRelevance(emailText);
 
     if (score > RELEVANCE_THRESHOLD) {
-        console.log(`✅ Email relevance ${score} > ${RELEVANCE_THRESHOLD} — enriching graph`);
+        console.log(`✅ Email relevance ${score} > ${RELEVANCE_THRESHOLD} — enriching graph (legacy + agent)`);
+        // Legacy path — kept active during parallel-run phase (see PRD §12).
         await intelligenceService.processMessageForGraph(emailText, {
             messageId: messageTraceId || `EMAIL-${Date.now()}`,
             sender: payload.sender,
+        });
+        // New path — enqueue for EmailAgent refinement.
+        await enqueueAgentJob({
+            channel: 'email',
+            sourceTable: 'emails',
+            sourceId: null,
+            payload: {
+                messageTraceId: messageTraceId || null,
+                sender:       payload.sender       || null,
+                receiver:     payload.receiver     || null,
+                message:      emailText,
+                employeeId:   payload.employeeId   || null,
+                threadId:     payload.threadId     || null,
+                relevanceScore: score,
+            },
         });
     } else {
         console.log(`⏭️  Email relevance ${score} ≤ ${RELEVANCE_THRESHOLD} — skipping graph enrichment`);
@@ -125,9 +142,25 @@ async function processWhatsApp(payload, messageTraceId) {
                 });
             }
         }
+        // Legacy path — parallel-run during PRD Phase B/C.
         await intelligenceService.processMessageForGraph(messageText, {
             messageId: messageTraceId || `WA-${Date.now()}`,
             sender: senderLabel,
+        });
+        // New path — enqueue for WhatsAppAgent (worker is a no-op until Phase C).
+        await enqueueAgentJob({
+            channel: 'whatsapp',
+            sourceTable: 'Whatsapp',
+            sourceId: null,
+            payload: {
+                messageTraceId: messageTraceId || null,
+                employeeId:   payload.employeeId   || null,
+                chatJid:      payload.chatJid      || null,
+                senderName:   payload.senderName   || null,
+                senderNumber: payload.senderNumber || null,
+                senderLabel:  senderLabel,
+                messageText:  messageText,
+            },
         });
     }
 }
