@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   omni-email:
     image: dhruvsharma983/map-my-email:latest
@@ -19,6 +17,20 @@ services:
     networks:
       - omni-network
 
+  omni-business:
+    image: dhruvsharma983/map-my-business:latest
+    container_name: omni-business
+    env_file: .env
+    restart: unless-stopped
+    networks:
+      - omni-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
   omni-backend:
     image: dhruvsharma983/wa-field-tracker:latest
     container_name: omni-backend
@@ -27,19 +39,30 @@ services:
     env_file: .env
     restart: unless-stopped
     depends_on:
-      - omni-email
-      - omni-whatsapp
+      omni-email:
+        condition: service_started
+      omni-whatsapp:
+        condition: service_started
+      omni-business:
+        condition: service_healthy
     networks:
       - omni-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
   omni-ui:
     image: dhruvsharma983/wa-field-tracker-ui:latest
     container_name: omni-ui
     ports:
-      - "80:80"
+      - "8090:80"
     restart: unless-stopped
     depends_on:
-      - omni-backend
+      omni-backend:
+        condition: service_healthy
     networks:
       - omni-network
 
