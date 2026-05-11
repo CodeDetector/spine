@@ -78,6 +78,21 @@ app.post('/api/employees', requireAuth, proxyToBusinessService);
 // omni-backend being actually ready (not just started).
 app.get('/health', (req, res) => res.json({ ok: true, service: 'omni-backend' }));
 
+// Public business-existence check — used by the auth page to decide whether
+// the visitor is registering a brand-new business (first admin) or signing
+// into an existing one. Returns only the boolean, never counts or details.
+app.get('/api/onboarding/has-business', async (req, res) => {
+    try {
+        const businessClient = require('./core/businessClient');
+        const status = await businessClient.getOnboardingStatus();
+        res.json({ hasBusiness: !!status.hasBusiness });
+    } catch (err) {
+        // Fail-open: if the service is down, fall back to "no business" so the
+        // auth page still renders. Better than blocking the entire UI.
+        res.json({ hasBusiness: false });
+    }
+});
+
 // Auth Endpoints
 // In-memory cooldown: track last confirmation email sent per address (60-second window)
 const emailCooldowns = {};
