@@ -1,21 +1,21 @@
 services:
-  omni-email:
-    image: dhruvsharma983/map-my-email:latest
-    container_name: omni-email
-    env_file: .env
-    restart: unless-stopped
-    networks:
-      - omni-network
+  # omni-email and omni-imap still run in-process inside omni-backend
+  # (see wa-field-tracker/index.js). omni-whatsapp is the first feeder split
+  # into its own container.
 
   omni-whatsapp:
     image: dhruvsharma983/map-my-whatsapp:latest
     container_name: omni-whatsapp
-    ports:
-      - "3001:3001"
     env_file: .env
     restart: unless-stopped
     networks:
       - omni-network
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
 
   omni-business:
     image: dhruvsharma983/map-my-business:latest
@@ -39,11 +39,9 @@ services:
     env_file: .env
     restart: unless-stopped
     depends_on:
-      omni-email:
-        condition: service_started
-      omni-whatsapp:
-        condition: service_started
       omni-business:
+        condition: service_healthy
+      omni-whatsapp:
         condition: service_healthy
     networks:
       - omni-network

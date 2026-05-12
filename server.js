@@ -223,96 +223,90 @@ app.get('/api/auth/me', async (req, res) => {
     }
 });
 
-// ─── WhatsApp (Baileys multi-tenant, in-process) ──────────────────────────────
-// The feeder runs in this same Node process — call its sessionManager directly.
-const { sessionManager: waSessions } = require('wa-field-tracker-feeder-whatsapp');
+// ─── WhatsApp (multi-tenant, in omni-whatsapp container) ──────────────────────
+// Session management is owned by the omni-whatsapp service. Each endpoint here
+// is a thin proxy that validates the user's JWT then makes an internal-token
+// call to omni-whatsapp:3001/sessions/:employeeId/*.
+const waClient = require('./core/waClient');
+
+function _waError(res, err) {
+    console.error('WA proxy error:', err.message);
+    res.status(502).json({ error: 'WhatsApp service unreachable: ' + err.message });
+}
 
 app.post('/api/whatsapp/connect', requireAuth, async (req, res) => {
     const { employeeId } = req.body;
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
-    waSessions.startSession(Number(employeeId)).catch(err =>
-        console.error(`startSession ${employeeId}:`, err.message)
-    );
-    res.json({ ok: true });
+    try {
+        await waClient.startSession(Number(employeeId));
+        res.json({ ok: true });
+    } catch (err) { _waError(res, err); }
 });
 
-app.get('/api/whatsapp/status', requireAuth, (req, res) => {
+app.get('/api/whatsapp/status', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
-    res.json(waSessions.getStatus(employeeId));
+    try {
+        res.json(await waClient.getStatus(employeeId));
+    } catch (err) { _waError(res, err); }
 });
 
 app.post('/api/whatsapp/disconnect', requireAuth, async (req, res) => {
     const { employeeId } = req.body;
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        await waSessions.disconnect(Number(employeeId));
+        await waClient.disconnect(Number(employeeId));
         res.json({ ok: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { _waError(res, err); }
 });
 
 app.get('/api/whatsapp/groups', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        res.json(await waSessions.listGroups(employeeId));
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json(await waClient.listGroups(employeeId));
+    } catch (err) { _waError(res, err); }
 });
 
-app.get('/api/whatsapp/contacts', requireAuth, (req, res) => {
+app.get('/api/whatsapp/contacts', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
-    res.json(waSessions.listContacts(employeeId));
+    try {
+        res.json(await waClient.listContacts(employeeId));
+    } catch (err) { _waError(res, err); }
 });
 
-// Manually add a contact by phone number (resolves JID without relying on contact-sync cache)
 app.post('/api/whatsapp/contacts/resolve', requireAuth, async (req, res) => {
     const { employeeId, phone } = req.body;
     if (!employeeId || !phone) return res.status(400).json({ error: 'employeeId and phone required' });
     try {
-        const results = await waSessions.resolvePhone(Number(employeeId), phone);
-        res.json(results);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json(await waClient.resolvePhone(Number(employeeId), phone));
+    } catch (err) { _waError(res, err); }
 });
 
 app.get('/api/whatsapp/tracked', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        res.json(await waSessions.listTracked(employeeId));
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+        res.json(await waClient.listTracked(employeeId));
+    } catch (err) { _waError(res, err); }
 });
 
 app.post('/api/whatsapp/track', requireAuth, async (req, res) => {
     const { employeeId, jid, displayName, chatType = 'group' } = req.body;
     if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
     try {
-        await waSessions.trackChat(Number(employeeId), jid, displayName, chatType);
-        const tracked = await waSessions.listTracked(Number(employeeId));
-        res.json({ ok: true, trackedCount: tracked.length });
-    } catch (err) {
-        console.error(`/track failed for emp ${employeeId}, jid ${jid}:`, err.message);
-        res.status(500).json({ error: err.message });
-    }
+        res.json(await waClient.trackChat(Number(employeeId), jid, displayName, chatType));
+    } catch (err) { _waError(res, err); }
 });
 
 app.delete('/api/whatsapp/track', requireAuth, async (req, res) => {
     const { employeeId, jid } = req.body;
     if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
     try {
-        await waSessions.untrackChat(Number(employeeId), jid);
+        await waClient.untrackChat(Number(employeeId), jid);
         res.json({ ok: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    } catch (err) { _waError(res, err); }
 });
 
 // Per-chat message viewers (read directly from Supabase — no feeder hop).
