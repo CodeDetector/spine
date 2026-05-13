@@ -661,20 +661,27 @@ class SupabaseService {
 
     // --- Knowledge Graph Operations ---
 
-    async upsertNode(type, name, properties = {}) {
+    // Idempotent on (type, name, scope_type, scope_employee_id). Scope params
+    // default to ('business', null) so legacy callers still target the BKG.
+    // Comms-scope callers MUST pass scopeEmployeeId; agents own that contract.
+    async upsertNode(type, name, properties = {}, scope = {}) {
         if (!this.client) return null;
+        const scopeType = scope.scope_type || 'business';
+        const scopeEmployeeId = scope.scope_employee_id ?? null;
         try {
-            // Find existing node by type and name — must select 'properties' too so
-            // the update spread below can merge old and new properties correctly.
-            const { data: existing, error: findError } = await this.client
+            let query = this.client
                 .from('nodes')
                 .select('id, properties')
                 .eq('type', type)
                 .eq('name', name)
-                .maybeSingle();
+                .eq('scope_type', scopeType);
+            query = scopeEmployeeId === null
+                ? query.is('scope_employee_id', null)
+                : query.eq('scope_employee_id', scopeEmployeeId);
+            const { data: existing, error: findError } = await query.maybeSingle();
+            if (findError) throw findError;
 
             if (existing) {
-                // Update properties
                 const { data: updated, error: updateError } = await this.client
                     .from('nodes')
                     .update({ properties: { ...existing.properties, ...properties }, updated_at: new Date() })
@@ -685,17 +692,15 @@ class SupabaseService {
                 return updated.id;
             }
 
-            // Create new node
             const { data: newNode, error: insertError } = await this.client
                 .from('nodes')
-                .insert([{ type, name, properties }])
+                .insert([{ type, name, properties, scope_type: scopeType, scope_employee_id: scopeEmployeeId }])
                 .select()
                 .single();
-
             if (insertError) throw insertError;
             return newNode.id;
         } catch (err) {
-            console.error(`❌ upsertNode failed (${type}:${name}):`, err.message);
+            console.error(`❌ upsertNode failed (${type}:${name}, scope=${scopeType}/${scopeEmployeeId}):`, err.message);
             return null;
         }
     }
@@ -788,8 +793,11 @@ class SupabaseService {
         }
     }
 
-    async createEdge(fromNodeId, toNodeId, relationshipType, properties = {}) {
+    // Scope params default to ('business', null) for legacy callers.
+    async createEdge(fromNodeId, toNodeId, relationshipType, properties = {}, scope = {}) {
         if (!this.client || !fromNodeId || !toNodeId) return null;
+        const scopeType = scope.scope_type || 'business';
+        const scopeEmployeeId = scope.scope_employee_id ?? null;
         try {
             const { data, error } = await this.client
                 .from('edges')
@@ -797,7 +805,9 @@ class SupabaseService {
                     from_node_id: fromNodeId,
                     to_node_id: toNodeId,
                     relationship_type: relationshipType,
-                    properties
+                    properties,
+                    scope_type: scopeType,
+                    scope_employee_id: scopeEmployeeId,
                 }])
                 .select()
                 .single();
@@ -805,7 +815,7 @@ class SupabaseService {
             if (error) throw error;
             return data.id;
         } catch (err) {
-            console.error(`❌ createEdge failed (${relationshipType}):`, err.message);
+            console.error(`❌ createEdge failed (${relationshipType}, scope=${scopeType}/${scopeEmployeeId}):`, err.message);
             return null;
         }
     }

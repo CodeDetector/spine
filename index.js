@@ -7,28 +7,15 @@
  * 3. Management Analytics (server.js - can be started separately)
  */
 
-const { intake }          = require('./core/intake');
-const { processEmail, processWhatsApp } = require('./core/channelProcessor');
+const { intake }      = require('./core/intake');
+const { processEmail } = require('./core/channelProcessor');
 
 console.log('🚀 Starting Omni-Brain Intelligence System...');
 
-// ── Wire the two-layer pipeline into each feeder BEFORE starting them ────────
+// ── Wire the email pipeline ──────────────────────────────────────────────────
+// WhatsApp ingestion is owned by the omni-whatsapp container now; nothing to
+// wire here. omni-whatsapp persists messages + enqueues agent_jobs directly.
 
-// WhatsApp: intake → messages table, then WA channel processor
-const waFeeder = require('wa-field-tracker-feeder-whatsapp');
-waFeeder.setWhatsAppHandler(async (parsedMessage, ownerEmployeeId) => {
-    const messageTraceId = await intake({ ...parsedMessage, employeeId: ownerEmployeeId });
-    if (!messageTraceId) return;
-    await processWhatsApp({
-        employeeId:   ownerEmployeeId,
-        chatJid:      parsedMessage.chatJid,
-        senderName:   parsedMessage.sender,
-        senderNumber: parsedMessage.senderNumber,
-        messageText:  parsedMessage.messageDetails,
-    }, messageTraceId);
-});
-
-// Email: intake → messages table, then email channel processor (with relevance gate)
 const emailFeeder = require('wa-field-tracker-feeder-email');
 emailFeeder.setEmailHandler(async (parsedEmail) => {
     const messageTraceId = await intake({
@@ -43,21 +30,18 @@ emailFeeder.setEmailHandler(async (parsedEmail) => {
     await processEmail(parsedEmail, messageTraceId);
 });
 
-// ── Start all feeders ────────────────────────────────────────────────────────
+// ── Start feeders ────────────────────────────────────────────────────────────
 
-// 1. WhatsApp (Baileys multi-tenant, in-process)
-waFeeder.run();
-
-// 2. Gmail
+// 1. Gmail (in-process)
 emailFeeder.run();
 
-// 3. IMAP (one.com, Outlook, Zoho, etc.)
+// 2. IMAP (in-process)
 require('wa-field-tracker-feeder-imap').run();
 
-// 4. Management API & Dashboard Server
+// 3. Management API & Dashboard Server
 require('./server');
 
-// 5. Refinement-agent worker — polls agent_jobs, dispatches to per-channel agents.
+// 4. Refinement-agent worker — polls agent_jobs, dispatches to per-channel agents.
 const agentWorker = require('./core/agents/worker');
 agentWorker.start();
 

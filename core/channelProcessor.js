@@ -110,77 +110,9 @@ async function _writeToEmailsTable(payload) {
     }
 }
 
-// ── WhatsApp ─────────────────────────────────────────────────────────────────
+// WhatsApp ingestion has moved to the omni-whatsapp container. The default
+// handler in mapMyWhatsapp/messageHandler.js now writes to `messages` +
+// `Whatsapp` tables and enqueues an agent_jobs row directly. Nothing for the
+// backend to do beyond serving the proxy endpoints in server.js.
 
-async function processWhatsApp(payload, messageTraceId) {
-    // 1. Always write WA channel metadata
-    await _writeToWhatsAppTable(payload, messageTraceId);
-
-    // 2. Mark knowledge map dirty
-    if (payload.employeeId) {
-        await supabaseService.markKnowledgeMapDirty(payload.employeeId);
-    }
-
-    // 3. Always enrich graph (WA messages are pre-filtered by tracked chats)
-    const messageText = payload.messageText || '';
-    if (messageText) {
-        // Resolve phone → email identity so the graph node can be unified
-        // with email interactions from the same person.
-        let senderLabel = payload.senderName || payload.senderNumber;
-        if (payload.senderNumber && payload.employeeId) {
-            const identity = await supabaseService.resolvePhoneToEmail(
-                payload.employeeId, payload.senderNumber
-            );
-            if (identity) {
-                // Prefer display name; annotate the node with the linked email
-                senderLabel = identity.display_name || payload.senderName || payload.senderNumber;
-                // Upsert the node with email property so future email messages
-                // that use the same email address will resolve to the same node.
-                await supabaseService.upsertNode('Contact', senderLabel, {
-                    phone: payload.senderNumber,
-                    email: identity.email,
-                });
-            }
-        }
-        // Legacy path — parallel-run during PRD Phase B/C.
-        await intelligenceService.processMessageForGraph(messageText, {
-            messageId: messageTraceId || `WA-${Date.now()}`,
-            sender: senderLabel,
-        });
-        // New path — enqueue for WhatsAppAgent (worker is a no-op until Phase C).
-        await enqueueAgentJob({
-            channel: 'whatsapp',
-            sourceTable: 'Whatsapp',
-            sourceId: null,
-            payload: {
-                messageTraceId: messageTraceId || null,
-                employeeId:   payload.employeeId   || null,
-                chatJid:      payload.chatJid      || null,
-                senderName:   payload.senderName   || null,
-                senderNumber: payload.senderNumber || null,
-                senderLabel:  senderLabel,
-                messageText:  messageText,
-            },
-        });
-    }
-}
-
-async function _writeToWhatsAppTable(payload, messageTraceId) {
-    if (!supabaseService.client) return;
-    try {
-        const { error } = await supabaseService.client
-            .from('Whatsapp')
-            .upsert([{
-                employeeID:     payload.employeeId,
-                messageTraceId: messageTraceId,
-                chatJid:        payload.chatJid        || null,
-                senderName:     payload.senderName     || null,
-                senderNumber:   payload.senderNumber   || null,
-            }], { onConflict: 'messageTraceId' });
-        if (error) console.error('❌ channelProcessor: Whatsapp upsert failed:', error.message);
-    } catch (err) {
-        console.error('❌ channelProcessor: _writeToWhatsAppTable failed:', err.message);
-    }
-}
-
-module.exports = { processEmail, processWhatsApp };
+module.exports = { processEmail };

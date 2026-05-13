@@ -22,8 +22,7 @@
     "multer": "^2.1.1",
     "pino": "^10.3.1",
     "wa-field-tracker-feeder-email": "github:CodeDetector/mapMyEmail#master",
-    "wa-field-tracker-feeder-imap": "github:CodeDetector/mapMyImap#master",
-    "wa-field-tracker-feeder-whatsapp": "github:CodeDetector/mapMyWhatsapp#master"
+    "wa-field-tracker-feeder-imap": "github:CodeDetector/mapMyImap#master"
   },
   "devDependencies": {
     "jest": "^30.3.0"
