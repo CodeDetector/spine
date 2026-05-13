@@ -1,13 +1,16 @@
 // Refinement-agent worker.
 //
 // Polls the agent_jobs queue and dispatches each job to its channel agent.
-// Phase A: only no-op handlers are registered for whatsapp/business.
-// Phase B: EmailAgent registered for 'email'. Worker starts on backend boot.
+// Three-agent migration is in progress (see specs/2026-05-11-three-agent-architecture.md).
+// Phase B: all channels currently route to NoopAgent — jobs drain harmlessly.
+// Phase C: BusinessContextAgent replaces noop for 'business'.
+// Phase D: CommunicationsAgent replaces noop for 'email' and 'whatsapp'.
 
 const supabaseService = require('../supabaseService');
 const businessContext = require('./businessContext');
 const diffApplier = require('./diffApplier');
-const EmailAgent = require('./emailAgent');
+const BusinessContextAgent = require('./businessContextAgent');
+const CommunicationsAgent = require('./communicationsAgent');
 
 const POLL_INTERVAL_MS    = 5000;
 const BATCH_SIZE          = 5;
@@ -121,14 +124,24 @@ async function _processOne(job, ctx) {
     try {
         const result = await agent.refine(job, ctx);
 
-        // Apply diff + write follow-ups. Noop for NoopAgent (empty arrays).
-        const applied = await diffApplier.apply({
-            jobId: job.id,
-            channel: job.channel,
-            agent: agent.name,
-            result,
-            businessCtx: ctx,
-        });
+        // Apply diff. Two modes:
+        //  - default: the worker applies once with the scope on the result
+        //    (or business-default scope if absent). Used by Business + Noop.
+        //  - opt-out: agent sets result.alreadyApplied=true if it ran the
+        //    applier itself per-participant. Used by CommunicationsAgent.
+        let applied = { nodesAdded: 0, nodesUpdated: 0, edgesAdded: 0, followUpsAdded: 0 };
+        if (!result?.alreadyApplied) {
+            applied = await diffApplier.apply({
+                jobId: job.id,
+                channel: job.channel,
+                agent: agent.name,
+                result,
+                businessCtx: ctx,
+                scope: result?.scope,
+            });
+        } else if (result?.appliedSummary) {
+            applied = result.appliedSummary; // agent reports what it applied
+        }
 
         const duration = Date.now() - t0;
         await _writeAuditRow({
@@ -176,10 +189,11 @@ function start() {
     if (_started) return;
     _started = true;
     console.log('🤖 agent worker starting…');
-    // Real agent for email; no-ops for the other channels until their agents land.
-    if (!_agents.has('email'))    registerAgent('email',    EmailAgent);
-    if (!_agents.has('whatsapp')) registerAgent('whatsapp', NoopAgent);
-    if (!_agents.has('business')) registerAgent('business', NoopAgent);
+    // Phase D of the three-agent migration: all channel agents are live.
+    // Synthesis runs on a separate cron (Phase F).
+    if (!_agents.has('email'))    registerAgent('email',    CommunicationsAgent);
+    if (!_agents.has('whatsapp')) registerAgent('whatsapp', CommunicationsAgent);
+    if (!_agents.has('business')) registerAgent('business', BusinessContextAgent);
 
     _resetStaleRunning().catch(() => {});
     _interval = setInterval(() => {
