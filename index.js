@@ -45,4 +45,8 @@ require('./server');
 const agentWorker = require('./core/agents/worker');
 agentWorker.start();
 
+// 5. Synthesis runner — periodic cross-graph proactive agent.
+const synthesisRunner = require('./core/agents/synthesisRunner');
+synthesisRunner.start();
+
 console.log('✅ Omni-Brain Orchestrator is running.');

@@ -339,14 +339,28 @@ app.get('/api/stats', requireAuth, async (req, res) => {
     res.json(stats);
 });
 
+// Scope helper used by graph + follow_ups reads. Returns the set of employee
+// IDs the caller is allowed to see (themselves + transitive reports).
+// Returns null if the caller has no employee row — caller decides how to handle.
+async function _callerVisibleEmployees(req) {
+    const scopeService = require('./core/agents/scopeService');
+    const caller = await supabaseService.getEmployeeByEmail(req.user.email);
+    if (!caller) return null;
+    return scopeService.visibleEmployeeIds(caller.id);
+}
+
 app.get('/api/graph/full', requireAuth, async (req, res) => {
-    const graph = await supabaseService.getFullGraph();
+    const visible = await _callerVisibleEmployees(req);
+    if (visible === null) return res.status(403).json({ error: 'no employee record for caller' });
+    const graph = await supabaseService.getFullGraph(visible);
     res.json(graph);
 });
 
 app.get('/api/graph/channels', requireAuth, async (req, res) => {
+    const visible = await _callerVisibleEmployees(req);
+    if (visible === null) return res.status(403).json({ error: 'no employee record for caller' });
     const channels = (req.query.channels || '').split(',').map(s => s.trim()).filter(Boolean);
-    const graph = await supabaseService.getGraphByChannels(channels);
+    const graph = await supabaseService.getGraphByChannels(channels, visible);
     res.json(graph);
 });
 
@@ -372,11 +386,92 @@ app.get('/api/graph/context', requireAuth, async (req, res) => {
 });
 
 // Pending follow-ups for an employee (email threads + KG commitments)
+// LEGACY shape, derived signals. Will be removed in Phase H once the UI
+// migrates to /api/follow_ups (agent-emitted).
 app.get('/api/followups', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     const data = await supabaseService.getPendingFollowups(employeeId);
     res.json(data);
+});
+
+// Agent-emitted follow-ups (the new path). Scoped to caller + their downline.
+// Manager-action endpoints (dismiss / done) live alongside.
+app.get('/api/follow_ups', requireAuth, async (req, res) => {
+    try {
+        const visible = await _callerVisibleEmployees(req);
+        if (visible === null) return res.status(403).json({ error: 'no employee record for caller' });
+        let query = supabaseService.client
+            .from('follow_ups')
+            .select('*')
+            .in('employee_id', visible)
+            .order('created_at', { ascending: false })
+            .limit(200);
+        const status = String(req.query.status || 'open');
+        if (status !== 'all') query = query.eq('status', status);
+        const { data, error } = await query;
+        if (error) throw error;
+        res.json(data || []);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+async function _resolveFollowUpForCaller(req, followUpId) {
+    const visible = await _callerVisibleEmployees(req);
+    if (visible === null) return { error: { status: 403, body: 'no employee record for caller' } };
+    const { data, error } = await supabaseService.client
+        .from('follow_ups')
+        .select('id, employee_id, status')
+        .eq('id', followUpId)
+        .maybeSingle();
+    if (error) return { error: { status: 500, body: error.message } };
+    if (!data) return { error: { status: 404, body: 'follow-up not found' } };
+    const visibleSet = new Set(visible.map(Number));
+    if (data.employee_id !== null && !visibleSet.has(Number(data.employee_id))) {
+        return { error: { status: 403, body: 'follow-up out of scope' } };
+    }
+    return { row: data };
+}
+
+app.post('/api/follow_ups/:id/dismiss', requireAuth, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'follow-up id required' });
+    const { row, error } = await _resolveFollowUpForCaller(req, id);
+    if (error) return res.status(error.status).json({ error: error.body });
+    const { error: updErr } = await supabaseService.client
+        .from('follow_ups')
+        .update({ status: 'dismissed', resolved_at: new Date().toISOString() })
+        .eq('id', row.id);
+    if (updErr) return res.status(500).json({ error: updErr.message });
+    res.json({ ok: true });
+});
+
+app.post('/api/follow_ups/:id/done', requireAuth, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'follow-up id required' });
+    const { row, error } = await _resolveFollowUpForCaller(req, id);
+    if (error) return res.status(error.status).json({ error: error.body });
+    const { error: updErr } = await supabaseService.client
+        .from('follow_ups')
+        .update({ status: 'done', resolved_at: new Date().toISOString() })
+        .eq('id', row.id);
+    if (updErr) return res.status(500).json({ error: updErr.message });
+    res.json({ ok: true });
+});
+
+// On-demand synthesis. Honors a 60s cache so users hammering the panel don't
+// burn tokens. Triggered when the UI opens the follow-ups view.
+app.post('/api/synthesis/refresh', requireAuth, async (req, res) => {
+    try {
+        const caller = await supabaseService.getEmployeeByEmail(req.user.email);
+        if (!caller) return res.status(403).json({ error: 'no employee record for caller' });
+        const synthesisRunner = require('./core/agents/synthesisRunner');
+        const r = await synthesisRunner.runOnDemand(caller.id);
+        res.json(r);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // Enrich knowledge graph from employee's email history

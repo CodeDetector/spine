@@ -907,20 +907,37 @@ class SupabaseService {
         }
     }
 
-    async getFullGraph() {
+    // Scope-aware fetch: business-scope rows always pass; comms-scope rows
+    // pass only if scope_employee_id ∈ visibleEmployeeIds.
+    // If visibleEmployeeIds is undefined or null, no comms filter is applied
+    // (legacy behavior — callers must opt out explicitly).
+    _scopeFilter(rows, visibleEmployeeIds) {
+        if (visibleEmployeeIds === undefined || visibleEmployeeIds === null) return rows;
+        const set = new Set(visibleEmployeeIds.map(Number));
+        return rows.filter(r =>
+            r.scope_type === 'business'
+            || (r.scope_type === 'comms' && set.has(Number(r.scope_employee_id)))
+        );
+    }
+
+    async getFullGraph(visibleEmployeeIds) {
         if (!this.client) return { nodes: [], edges: [] };
         try {
             const { data: nodes, error: nErr } = await this.client.from('nodes').select('*');
             const { data: edges, error: eErr } = await this.client.from('edges').select('*');
             if (nErr || eErr) throw nErr || eErr;
-            return { nodes, edges };
+            const filteredNodes = this._scopeFilter(nodes || [], visibleEmployeeIds);
+            const nodeIds = new Set(filteredNodes.map(n => n.id));
+            const filteredEdges = (edges || [])
+                .filter(e => nodeIds.has(e.from_node_id) && nodeIds.has(e.to_node_id));
+            return { nodes: filteredNodes, edges: filteredEdges };
         } catch (err) {
             console.error('❌ getFullGraph failed:', err.message);
             return { nodes: [], edges: [] };
         }
     }
 
-    async getGraphByChannels(channels) {
+    async getGraphByChannels(channels, visibleEmployeeIds) {
         if (!this.client) return { nodes: [], edges: [] };
         try {
             const { data: allNodes, error: nErr } = await this.client.from('nodes').select('*');
@@ -943,7 +960,8 @@ class SupabaseService {
             const allowedTypes = new Set();
             channels.forEach(ch => (channelNodeTypes[ch] || []).forEach(t => allowedTypes.add(t)));
 
-            const filteredNodes = (allNodes || []).filter(n => allowedTypes.has(n.type));
+            const scopedNodes = this._scopeFilter(allNodes || [], visibleEmployeeIds);
+            const filteredNodes = scopedNodes.filter(n => allowedTypes.has(n.type));
             const nodeIds = new Set(filteredNodes.map(n => n.id));
             const filteredEdges = (allEdges || []).filter(
                 e => nodeIds.has(e.from_node_id) && nodeIds.has(e.to_node_id)
