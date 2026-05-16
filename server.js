@@ -291,12 +291,69 @@ app.get('/api/whatsapp/tracked', requireAuth, async (req, res) => {
         res.json(await waClient.listTracked(employeeId));
     } catch (err) { _waError(res, err); }
 });
-
++
 app.post('/api/whatsapp/track', requireAuth, async (req, res) => {
     const { employeeId, jid, displayName, chatType = 'group' } = req.body;
     if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
     try {
         res.json(await waClient.trackChat(Number(employeeId), jid, displayName, chatType));
+    } catch (err) { _waError(res, err); }
+});
+
+// Tracked groups for an employee, annotated with unresolved-participant counts.
+app.get('/api/whatsapp/tracked-with-status', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        const { groupParticipantsService } = require('./core');
+        const tracked = await waClient.listTracked(employeeId);
+        const counts  = await groupParticipantsService.getUnresolvedCountsByEmployee(employeeId);
+        res.json(tracked.map(t => ({
+            ...t,
+            unresolved: counts[t.jid]?.unresolved || 0,
+            totalMembers: counts[t.jid]?.total || 0,
+        })));
+    } catch (err) { _waError(res, err); }
+});
+
+// ─── Group identification (participant resolution) ────────────────────────
+
+// Seed wa_group_participants for a tracked group — called right after track,
+// returns the list of participants the user must resolve in the wizard.
+app.post('/api/whatsapp/groups/seed-participants', requireAuth, async (req, res) => {
+    const { employeeId, jid, ownerJid } = req.body;
+    if (!employeeId || !jid) return res.status(400).json({ error: 'employeeId and jid required' });
+    try {
+        const { groupParticipantsService } = require('./core');
+        await groupParticipantsService.seedGroupParticipants(Number(employeeId), jid, ownerJid || null);
+        const rows = await groupParticipantsService.listForGroup(Number(employeeId), jid);
+        res.json(rows);
+    } catch (err) { _waError(res, err); }
+});
+
+app.get('/api/whatsapp/groups/:jid/participants', requireAuth, async (req, res) => {
+    const employeeId = Number(req.query.employeeId);
+    if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
+    try {
+        const { groupParticipantsService } = require('./core');
+        res.json(await groupParticipantsService.listForGroup(employeeId, req.params.jid));
+    } catch (err) { _waError(res, err); }
+});
+
+app.post('/api/whatsapp/groups/:jid/resolve', requireAuth, async (req, res) => {
+    const { employeeId, participantJid, contactId } = req.body;
+    if (!employeeId || !participantJid || !contactId) {
+        return res.status(400).json({ error: 'employeeId, participantJid, contactId required' });
+    }
+    try {
+        const { groupParticipantsService } = require('./core');
+        await groupParticipantsService.resolveParticipant(
+            Number(employeeId), req.params.jid, participantJid, contactId
+        );
+        const ready = await groupParticipantsService.isGroupReady(Number(employeeId), req.params.jid);
+        // Tell the WA service to re-read the ready-set so the message gate updates
+        waClient.refreshReadyCache(Number(employeeId)).catch(() => {});
+        res.json({ ok: true, ready });
     } catch (err) { _waError(res, err); }
 });
 

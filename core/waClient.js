@@ -35,6 +35,15 @@ const disconnect = (employeeId) =>
 const listGroups = (employeeId) =>
     call(`/sessions/${employeeId}/groups`);
 
+const getGroupParticipants = (employeeId, jid) =>
+    call(`/sessions/${employeeId}/groups/participants`, {
+        method: 'POST',
+        body: JSON.stringify({ jid }),
+    });
+
+const refreshReadyCache = (employeeId) =>
+    call(`/sessions/${employeeId}/refresh-ready`, { method: 'POST' });
+
 const listContacts = (employeeId) =>
     call(`/sessions/${employeeId}/contacts`);
 
@@ -62,6 +71,6 @@ const untrackChat = (employeeId, jid) =>
 
 module.exports = {
     startSession, getStatus, disconnect,
-    listGroups, listContacts, resolvePhone,
+    listGroups, getGroupParticipants, refreshReadyCache, listContacts, resolvePhone,
     listTracked, trackChat, untrackChat,
 };
