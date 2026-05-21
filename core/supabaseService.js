@@ -619,46 +619,6 @@ class SupabaseService {
         }
     }
 
-    async getDailyMessages() {
-        if (!this.client) return [];
-        try {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-            
-            const { data, error } = await this.client
-                .from('messages')
-                .select('id, description, created_at, employees(Name)')
-                .gte('created_at', today.toISOString())
-                .order('created_at', { ascending: true });
-
-            if (error) throw error;
-            return data;
-        } catch (err) {
-            console.error('❌ getDailyMessages failed:', err.message);
-            return [];
-        }
-    }
-
-    async getDailyEmails() {
-        if (!this.client) return [];
-        try {
-            const today = new Date();
-            today.setHours(0, 0, 0, 0);
-
-            const { data, error } = await this.client
-                .from('emails')
-                .select('id, sender, receiver, message, created_at, employees(Name)')
-                .gte('created_at', today.toISOString())
-                .order('created_at', { ascending: true });
-
-            if (error) throw error;
-            return data;
-        } catch (err) {
-            console.error('❌ getDailyEmails failed:', err.message);
-            return [];
-        }
-    }
-
     // --- Knowledge Graph Operations ---
 
     // Idempotent on (type, name, scope_type, scope_employee_id). Scope params
@@ -1071,7 +1031,7 @@ class SupabaseService {
         try {
             const { data, error } = await this.client
                 .from('employees')
-                .select('id, Name, Role, Mobile, contact, emailId, managedBy')
+                .select('id, Name, Role, Mobile, contact, emailId, managedBy, is_admin')
                 .eq('emailId', email)
                 .maybeSingle();
             if (error) return null;
@@ -1299,29 +1259,6 @@ class SupabaseService {
             return data || null;
         } catch {
             return null;
-        }
-    }
-
-    async markKnowledgeMapDirty(employeeId) {
-        if (!this.client || !employeeId) return;
-        try {
-            const { data: existing } = await this.client
-                .from('knowledge_maps')
-                .select('id')
-                .eq('employee_id', employeeId)
-                .maybeSingle();
-            if (existing) {
-                await this.client
-                    .from('knowledge_maps')
-                    .update({ is_dirty: true, updated_at: new Date().toISOString() })
-                    .eq('id', existing.id);
-            } else {
-                await this.client
-                    .from('knowledge_maps')
-                    .insert([{ employee_id: employeeId, is_dirty: true, knowledge_map: {} }]);
-            }
-        } catch (err) {
-            console.error(`❌ markKnowledgeMapDirty failed for ${employeeId}:`, err.message);
         }
     }
 

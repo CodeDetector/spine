@@ -7,13 +7,7 @@
  *   processEmail(payload, messageTraceId)
  *     - Always writes to `emails` table (full email metadata)
  *     - Scores business relevance via Gemini
- *     - Only ingests into knowledge graph if score > RELEVANCE_THRESHOLD (80)
- *     - Marks knowledge map dirty
- *
- *   processWhatsApp(payload, messageTraceId)
- *     - Always writes to `Whatsapp` table (channel metadata)
- *     - Always ingests into knowledge graph (already filtered by tracked chats)
- *     - Marks knowledge map dirty
+ *     - Only enqueues a CommunicationsAgent job if score > RELEVANCE_THRESHOLD (80)
  *
  * Expected payload shapes:
  *
@@ -22,15 +16,9 @@
  *     sender, receiver, message, employeeId, oppositionId?,
  *     mediaHash?, mediaUrl?, hash?, threadId?
  *   }
- *
- *   WhatsApp payload:
- *   {
- *     employeeId, messageTraceId (same as passed arg), chatJid,
- *     senderName?, senderNumber?, messageText (for graph)
- *   }
  */
 
-const supabaseService    = require('./supabaseService');
+const supabaseService     = require('./supabaseService');
 const intelligenceService = require('./intelligenceService');
 const { enqueue: enqueueAgentJob } = require('./agents/queue');
 
@@ -42,23 +30,12 @@ async function processEmail(payload, messageTraceId) {
     // 1. Always store in emails table
     await _writeToEmailsTable(payload);
 
-    // 2. Mark knowledge map dirty regardless of relevance
-    if (payload.employeeId) {
-        await supabaseService.markKnowledgeMapDirty(payload.employeeId);
-    }
-
-    // 3. Relevance gate — only enrich graph if score > threshold
+    // 2. Relevance gate — only enrich graph if score > threshold
     const emailText = payload.message || '';
     const score = await intelligenceService.scoreEmailRelevance(emailText);
 
     if (score > RELEVANCE_THRESHOLD) {
-        console.log(`✅ Email relevance ${score} > ${RELEVANCE_THRESHOLD} — enriching graph (legacy + agent)`);
-        // Legacy path — kept active during parallel-run phase (see PRD §12).
-        await intelligenceService.processMessageForGraph(emailText, {
-            messageId: messageTraceId || `EMAIL-${Date.now()}`,
-            sender: payload.sender,
-        });
-        // New path — enqueue for EmailAgent refinement.
+        console.log(`✅ Email relevance ${score} > ${RELEVANCE_THRESHOLD} — enqueuing for CommunicationsAgent`);
         await enqueueAgentJob({
             channel: 'email',
             sourceTable: 'emails',

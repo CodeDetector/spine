@@ -26,6 +26,21 @@ async function requireAuth(req, res, next) {
     }
 }
 
+// Chain after requireAuth. Resolves the JWT user to an employee row and
+// gates the request on is_admin=true. Sets req.employee for the handler.
+async function requireAdmin(req, res, next) {
+    try {
+        const employee = await supabaseService.getEmployeeByEmail(req.user.email);
+        if (!employee || !employee.is_admin) {
+            return res.status(403).json({ error: 'Admin only' });
+        }
+        req.employee = employee;
+        next();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+}
+
 // ─── Proxy: business onboarding paths -> omni-business container ──────────────
 // JWT is validated here; the downstream service trusts the X-Internal-User-* headers
 // because omni-business is only reachable on the omni-network bridge (not exposed).
@@ -531,56 +546,77 @@ app.post('/api/synthesis/refresh', requireAuth, async (req, res) => {
     }
 });
 
-// Enrich knowledge graph from employee's email history
+// Enrich knowledge graph from employee's email history. Enqueues one
+// agent_jobs row per historical email; CommunicationsAgent then writes
+// the comms graph the same way it does for live messages.
 app.post('/api/graph/enrich', async (req, res) => {
-    const { employeeId, employeeName } = req.body;
+    const { employeeId } = req.body;
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        const { intelligenceService } = require('./core');
+        const { enqueue: enqueueAgentJob } = require('./core/agents/queue');
         const emails = await supabaseService.getEmailsByEmployeeId(employeeId, 30);
 
         if (emails.length === 0) {
-            return res.json({ success: true, processed: 0 });
+            return res.json({ success: true, enqueued: 0 });
         }
 
-        let logBlob = `--- EMAIL HISTORY FOR: ${employeeName || 'Employee'} ---\n\n`;
-        emails.forEach(e => {
-            logBlob += `[EMAIL] From: ${e.sender || ''} To: ${e.receiver || ''}\nContent: ${e.message || ''}\n\n`;
-        });
+        let enqueued = 0;
+        for (const e of emails) {
+            const job = await enqueueAgentJob({
+                channel: 'email',
+                sourceTable: 'emails',
+                sourceId: null,
+                payload: {
+                    sender:     e.sender   || null,
+                    receiver:   e.receiver || null,
+                    message:    e.message  || '',
+                    employeeId,
+                    threadId:   null,
+                    historical: true,
+                },
+            });
+            if (job) enqueued++;
+        }
 
-        await intelligenceService.processMessageForGraph(logBlob, {
-            messageId: `EMAIL-ENRICH-${employeeId}-${Date.now()}`
-        });
-
-        res.json({ success: true, processed: emails.length });
+        res.json({ success: true, enqueued });
     } catch (err) {
         console.error('❌ /api/graph/enrich error:', err.message);
         res.status(500).json({ error: err.message });
     }
 });
 
-// Enrich knowledge graph from employee's WhatsApp message history
+// Enrich knowledge graph from employee's WhatsApp message history. Same
+// per-message enqueue pattern as the email enrich endpoint.
 app.post('/api/graph/enrich-whatsapp', async (req, res) => {
-    const { employeeId, employeeName } = req.body;
+    const { employeeId } = req.body;
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        const { intelligenceService } = require('./core');
+        const { enqueue: enqueueAgentJob } = require('./core/agents/queue');
         const messages = await supabaseService.getWhatsAppMessagesForEnrichment(employeeId, 30);
 
         if (messages.length === 0) {
-            return res.json({ success: true, processed: 0 });
+            return res.json({ success: true, enqueued: 0 });
         }
 
-        let logBlob = `--- WHATSAPP HISTORY FOR: ${employeeName || 'Employee'} ---\n\n`;
-        messages.forEach(m => {
-            logBlob += `[WHATSAPP] Chat: ${m.chatJid || ''} | From: ${m.senderName || m.senderNumber || ''}\nContent: ${m.description || ''}\n\n`;
-        });
+        let enqueued = 0;
+        for (const m of messages) {
+            const job = await enqueueAgentJob({
+                channel: 'whatsapp',
+                sourceTable: 'Whatsapp',
+                sourceId: null,
+                payload: {
+                    chatJid:      m.chatJid      || null,
+                    senderName:   m.senderName   || null,
+                    senderNumber: m.senderNumber || null,
+                    messageText:  m.description  || '',
+                    employeeId,
+                    historical:   true,
+                },
+            });
+            if (job) enqueued++;
+        }
 
-        await intelligenceService.processMessageForGraph(logBlob, {
-            messageId: `WA-ENRICH-${employeeId}-${Date.now()}`
-        });
-
-        res.json({ success: true, processed: messages.length });
+        res.json({ success: true, enqueued });
     } catch (err) {
         console.error('❌ /api/graph/enrich-whatsapp error:', err.message);
         res.status(500).json({ error: err.message });
@@ -620,22 +656,46 @@ app.delete('/api/graph/chat/session/:sessionId', requireAuth, (req, res) => {
     res.json({ cleared: true });
 });
 
-app.post('/api/agent/upload', requireAuth, upload.single('document'), async (req, res) => {
+// Admin-only: upload a document to enrich the BUSINESS knowledge graph.
+// We persist the file to the documents bucket and enqueue a business-channel
+// agent_jobs row; BusinessContextAgent then writes the graph. Direct writes
+// from this endpoint are not allowed — agents own the graph.
+app.post('/api/agent/upload', requireAuth, requireAdmin, upload.single('document'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: 'No document uploaded' });
-    
+
     try {
-        const { intelligenceService, supabaseService } = require('./core');
-        
-        // Save to bucket
+        const { supabaseService } = require('./core');
+        const { enqueue: enqueueAgentJob } = require('./core/agents/queue');
+
         const bucket = 'documents';
         const uploadPath = `uploads/${Date.now()}_${req.file.originalname}`;
-        await supabaseService.uploadFile(bucket, uploadPath, req.file.buffer, req.file.mimetype);
-        
-        // Parse doc and update map
+        const storageUrl = await supabaseService.uploadFile(
+            bucket, uploadPath, req.file.buffer, req.file.mimetype
+        );
+
         const textContent = req.file.buffer.toString('utf8'); // basic parse for text/csv
-        await intelligenceService.parseDocumentForGraph(textContent, req.file.originalname);
-        
-        res.json({ success: true, message: 'Document parsed and knowledge map updated.' });
+
+        const job = await enqueueAgentJob({
+            channel: 'business',
+            sourceTable: 'document_uploads',
+            sourceId: null,
+            payload: {
+                action: 'document_upload',
+                row: {
+                    fileName:    req.file.originalname,
+                    mimeType:    req.file.mimetype,
+                    storageUrl:  storageUrl || null,
+                    uploadedBy:  req.employee.id,
+                    textContent: textContent.slice(0, 50000),
+                },
+            },
+        });
+
+        res.status(202).json({
+            success: true,
+            jobId: job?.id || null,
+            message: 'Document queued for graph enrichment.',
+        });
     } catch (err) {
         console.error('❌ Document upload error:', err);
         res.status(500).json({ error: err.message });
