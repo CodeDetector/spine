@@ -26,11 +26,68 @@ async function requireAuth(req, res, next) {
     }
 }
 
-// Chain after requireAuth. Resolves the JWT user to an employee row and
-// gates the request on is_admin=true. Sets req.employee for the handler.
-async function requireAdmin(req, res, next) {
+// Tenant resolution cache. Keyed by JWT sub (auth user id). Saves the DB hop
+// on every authed request — without this, requireTenantAuth doubles the
+// latency of every endpoint. 60s TTL is short enough that role/admin/business
+// changes propagate quickly and long enough to absorb burst traffic.
+const TENANT_CACHE_TTL_MS = 60_000;
+const _tenantCache = new Map(); // sub -> { employee, business_id, ts }
+
+function _cachedTenant(sub) {
+    const hit = _tenantCache.get(sub);
+    if (!hit) return null;
+    if (Date.now() - hit.ts > TENANT_CACHE_TTL_MS) {
+        _tenantCache.delete(sub);
+        return null;
+    }
+    return hit;
+}
+
+// Chain after requireAuth. Resolves the JWT user to an employee row, derives
+// business_id, and exposes both on req. Returns 403 NO_EMPLOYEE_RECORD for
+// authenticated users with no employees row (the PostLoginChooser UI handles
+// this case once shipped; until then orphans simply see a 403).
+async function _resolveTenant(req, res, next) {
+    const sub = req.user?.id;
+    if (!sub) return res.status(401).json({ error: 'Unauthorized' });
+    const cached = _cachedTenant(sub);
+    if (cached) {
+        req.employee = cached.employee;
+        req.business_id = cached.business_id;
+        return next();
+    }
     try {
         const employee = await supabaseService.getEmployeeByEmail(req.user.email);
+        if (!employee || !employee.business_id) {
+            return res.status(403).json({ error: 'NO_EMPLOYEE_RECORD' });
+        }
+        _tenantCache.set(sub, {
+            employee,
+            business_id: employee.business_id,
+            ts: Date.now(),
+        });
+        req.employee = employee;
+        req.business_id = employee.business_id;
+        next();
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+}
+
+function requireTenantAuth(req, res, next) {
+    requireAuth(req, res, (err) => {
+        if (err) return next(err);
+        if (res.headersSent) return;
+        _resolveTenant(req, res, next);
+    });
+}
+
+// Chain after requireAuth (or requireTenantAuth). Gates the request on
+// is_admin=true. Reuses req.employee if requireTenantAuth already populated it.
+async function requireAdmin(req, res, next) {
+    try {
+        const employee = req.employee
+            || await supabaseService.getEmployeeByEmail(req.user.email);
         if (!employee || !employee.is_admin) {
             return res.status(403).json({ error: 'Admin only' });
         }
@@ -64,6 +121,10 @@ async function proxyToBusinessService(req, res) {
                 'X-Internal-Service-Token': process.env.INTERNAL_SERVICE_TOKEN || '',
                 'X-Internal-User-Email': req.user.email,
                 'X-Internal-User-Id': req.user.id,
+                // Lets the downstream service skip its own employees lookup.
+                // Absent on POST /api/employees (the orphan invite-accept path)
+                // where the caller has no employees row yet.
+                ...(req.business_id ? { 'X-Internal-Business-Id': String(req.business_id) } : {}),
             },
         };
         if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -82,11 +143,13 @@ async function proxyToBusinessService(req, res) {
 }
 
 for (const p of BUSINESS_PROXY_PATHS) {
-    app.use(p, requireAuth, proxyToBusinessService);
+    app.use(p, requireTenantAuth, proxyToBusinessService);
 }
 
-// Special case: POST /api/employees is handled by mapMyBusiness (invite-gated registration),
-// but GET /api/employees stays here (it lists employees from the existing supabase service).
+// Special case: POST /api/employees is the invite-accepting registration path.
+// At this point the caller has a Supabase Auth user but no employees row yet,
+// so requireTenantAuth would 403. Use plain requireAuth — the downstream
+// service derives business_id from the pending invitation row.
 app.post('/api/employees', requireAuth, proxyToBusinessService);
 
 // Health check — unauthenticated, used by docker-compose to gate omni-ui on
@@ -303,7 +366,16 @@ app.get('/api/whatsapp/tracked', requireAuth, async (req, res) => {
     const employeeId = Number(req.query.employeeId);
     if (!employeeId) return res.status(400).json({ error: 'employeeId required' });
     try {
-        res.json(await waClient.listTracked(employeeId));
+        const { groupParticipantsService } = require('./core');
+        const [tracked, readyGroups] = await Promise.all([
+            waClient.listTracked(employeeId),
+            groupParticipantsService.getReadyGroupSet(employeeId),
+        ]);
+        // Surface a group only once every participant is resolved; 1:1 chats pass through.
+        const filtered = tracked.filter(t =>
+            !t.jid?.endsWith('@g.us') || readyGroups.has(t.jid)
+        );
+        res.json(filtered);
     } catch (err) { _waError(res, err); }
 });
 +

@@ -80,7 +80,17 @@ async function apply({ jobId, channel, agent, result, businessCtx, scope }) {
 
     // 3. Follow-ups
     if (followUps.length && supabaseService.client) {
+        // follow_ups.business_id is NOT NULL — every row in businessCtx.employees
+        // belongs to the same tenant, so the first row's business_id is the
+        // tenant for this run. If the context is empty (no employees), skip
+        // the insert; we have no honest tenant to attribute the rows to.
+        const businessId = businessCtx?.employees?.[0]?.business_id || null;
+        if (!businessId) {
+            console.warn(`diffApplier: no business_id resolvable for job ${jobId}; follow_ups skipped`);
+            return out;
+        }
         const rows = followUps.map(f => ({
+            business_id: businessId,
             channel,
             source_job_id: jobId,
             employee_id: _findEmployeeIdByName(businessCtx?.employees, f.targetEmployeeName),

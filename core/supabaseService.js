@@ -1031,7 +1031,7 @@ class SupabaseService {
         try {
             const { data, error } = await this.client
                 .from('employees')
-                .select('id, Name, Role, Mobile, contact, emailId, managedBy, is_admin')
+                .select('id, Name, Role, Mobile, contact, emailId, managedBy, is_admin, business_id')
                 .eq('emailId', email)
                 .maybeSingle();
             if (error) return null;
