@@ -25,7 +25,7 @@ async function _employeesNeedingPeriodic() {
     // comms-graph activity timestamp.
     const { data } = await supabaseService.client
         .from('employees')
-        .select('id, Name, Role, is_admin, "managedBy"');
+        .select('id, Name, Role, is_admin, "managedBy", business_id');
     return data || [];
 }
 
@@ -88,7 +88,7 @@ async function runOnDemand(employeeId) {
 
     const { data: empRow } = await supabaseService.client
         .from('employees')
-        .select('id, Name, Role, is_admin, "managedBy"')
+        .select('id, Name, Role, is_admin, "managedBy", business_id')
         .eq('id', employeeId)
         .maybeSingle();
     if (!empRow) return { emitted: 0, cached: false, error: 'employee not found' };

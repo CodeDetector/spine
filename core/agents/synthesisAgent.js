@@ -191,6 +191,9 @@ async function runFor({ employee, businessCtx, visibleEmployeeIds }) {
     }
 
     const rows = proposals.map(p => ({
+        // follow_ups.business_id is NOT NULL. The synthesis run is scoped to
+        // a single requesting employee, so their tenant is the row's tenant.
+        business_id: employee.business_id,
         channel: 'synthesis',
         source_job_id: null,
         employee_id: findTargetId(p.targetEmployeeName),

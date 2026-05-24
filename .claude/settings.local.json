@@ -2,7 +2,14 @@
   "permissions": {
     "allow": [
       "Bash(node -e \"const {damerauLevenshtein} = require\\('./core/utils'\\); console.log\\(damerauLevenshtein\\('lvave', 'leave'\\)\\);\")",
-      "Bash(npx jest *)"
+      "Bash(npx jest *)",
+      "Bash(findstr /i \"profileService\")",
+      "Bash(git rm *)",
+      "Bash(rm intelligenceService.js)",
+      "Bash(rm c:/Users/HP/mapMyWhatsapp/intelligenceService.js)"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\HP\\mapMyWhatsapp"
     ]
   }
 }
