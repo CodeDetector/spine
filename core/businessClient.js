@@ -27,8 +27,11 @@ async function readProfile() {
     catch (err) { console.error('businessClient.readProfile:', err.message); return null; }
 }
 
-async function getOnboardingStatus() {
-    try { return await call('/internal/onboarding/status'); }
+async function getOnboardingStatus(businessId) {
+    const path = businessId
+        ? `/internal/onboarding/status?business_id=${encodeURIComponent(businessId)}`
+        : '/internal/onboarding/status';
+    try { return await call(path); }
     catch (err) {
         console.error('businessClient.getOnboardingStatus:', err.message);
         return { hasBusiness: false, supplierCount: 0, clientCount: 0, hasAdmin: false, employeeCount: 0 };

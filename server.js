@@ -156,19 +156,342 @@ app.post('/api/employees', requireAuth, proxyToBusinessService);
 // omni-backend being actually ready (not just started).
 app.get('/health', (req, res) => res.json({ ok: true, service: 'omni-backend' }));
 
-// Public business-existence check — used by the auth page to decide whether
-// the visitor is registering a brand-new business (first admin) or signing
-// into an existing one. Returns only the boolean, never counts or details.
-app.get('/api/onboarding/has-business', async (req, res) => {
-    try {
-        const businessClient = require('./core/businessClient');
-        const status = await businessClient.getOnboardingStatus();
-        res.json({ hasBusiness: !!status.hasBusiness });
-    } catch (err) {
-        // Fail-open: if the service is down, fall back to "no business" so the
-        // auth page still renders. Better than blocking the entire UI.
-        res.json({ hasBusiness: false });
+// ─── Onboarding landing ──────────────────────────────────────────────────────
+// Public surfaces that drive the three-CTA AuthPage (Login / Onboard your
+// business / Request to join). All public — no JWT required, and lightly
+// rate-limited (in-memory counter, sufficient for the auth-page surface).
+
+const PERSONAL_DOMAINS = new Set([
+    'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',
+    'icloud.com', 'protonmail.com',
+]);
+function _domainFromEmail(email) {
+    return String(email || '').toLowerCase().split('@')[1] || '';
+}
+function _isPersonalDomain(domain) {
+    return PERSONAL_DOMAINS.has(String(domain || '').toLowerCase());
+}
+
+const _ipHits = new Map(); // ip -> { count, resetAt }
+function _rateLimit(req, res, max = 20, windowMs = 60_000) {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.ip || 'unknown';
+    const now = Date.now();
+    const entry = _ipHits.get(ip);
+    if (!entry || now > entry.resetAt) {
+        _ipHits.set(ip, { count: 1, resetAt: now + windowMs });
+        return true;
     }
+    if (entry.count >= max) {
+        res.status(429).json({ error: 'Too many requests — slow down and try again in a minute.' });
+        return false;
+    }
+    entry.count++;
+    return true;
+}
+
+// Public — does a tenant own this domain? Used by AuthPage to branch the
+// visitor between Onboard-your-business and Request-to-join, and by the
+// Onboard form to give an instant client-side warning. Leaks "is this
+// domain a customer" by design.
+app.get('/api/onboarding/lookup-domain', async (req, res) => {
+    if (!_rateLimit(req, res)) return;
+    const domain = String(req.query.domain || '').toLowerCase().trim();
+    if (!domain) return res.status(400).json({ error: 'domain required' });
+    try {
+        const { data, error } = await supabaseService.client
+            .from('businesses')
+            .select('name')
+            .eq('email_domain', domain)
+            .maybeSingle();
+        if (error) throw error;
+        res.json({ exists: !!data, businessName: data?.name || null });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Create a brand-new tenant + its first admin atomically.
+//
+// Two callers:
+//  1. Anonymous (no Authorization header). Body must include email + password;
+//     we run Supabase Auth signUp first, then call the DB RPC.
+//  2. Orphan (Authorization: Bearer <JWT>). The Supabase Auth user already
+//     exists — we skip signUp, derive email from the JWT, and only run the
+//     RPC. This is the "PostLoginChooser → Onboard" flow.
+app.post('/api/onboarding/business', async (req, res) => {
+    if (!_rateLimit(req, res, 6)) return;
+    const { businessName, emailDomain, email: bodyEmail, password } = req.body || {};
+    if (!businessName || !emailDomain) {
+        return res.status(400).json({ error: 'businessName and emailDomain are required' });
+    }
+    const normalizedDomain = String(emailDomain).toLowerCase().trim();
+    if (_isPersonalDomain(normalizedDomain)) {
+        return res.status(400).json({ error: 'Personal email domains are not allowed — use your company domain.' });
+    }
+
+    // Path selection: Bearer token wins over body-supplied email/password.
+    const bearer = req.headers.authorization?.replace('Bearer ', '');
+    let authedEmail = null;
+    let authedUserId = null;
+    if (bearer) {
+        try {
+            const { data: { user }, error } = await supabaseService.client.auth.getUser(bearer);
+            if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
+            authedEmail  = user.email.toLowerCase();
+            authedUserId = user.id;
+        } catch (err) {
+            return res.status(401).json({ error: 'Invalid or expired token' });
+        }
+    }
+
+    const normalizedEmail = (authedEmail || String(bodyEmail || '').toLowerCase().trim());
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+        return res.status(400).json({ error: 'A valid email is required.' });
+    }
+    if (_domainFromEmail(normalizedEmail) !== normalizedDomain) {
+        return res.status(400).json({ error: 'Your business email must match the company email domain.' });
+    }
+
+    // Anonymous path requires password; authed path skips signUp.
+    if (!authedEmail) {
+        if (!password || password.length < 8) {
+            return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+        }
+    }
+
+    let needsConfirmation = false;
+    try {
+        if (!authedEmail) {
+            // Anonymous → create the Supabase Auth user. Fresh client so the
+            // server's persistent client doesn't carry the new session.
+            const { createClient } = require('@supabase/supabase-js');
+            const tempClient = createClient(config.SUPABASE_URL, config.SUPABASE_KEY, {
+                auth: { persistSession: false, autoRefreshToken: false },
+            });
+            const { data: signUpData, error: signUpErr } = await tempClient.auth.signUp({
+                email: normalizedEmail, password,
+            });
+            if (signUpErr) {
+                if (isAlreadyRegisteredError(signUpErr.message)) {
+                    return res.status(409).json({ error: 'ALREADY_REGISTERED' });
+                }
+                if (isRateLimitError(signUpErr.message)) {
+                    return res.status(429).json({ error: 'EMAIL_RATE_LIMIT' });
+                }
+                return res.status(400).json({ error: signUpErr.message });
+            }
+            needsConfirmation = !signUpData.session;
+        }
+
+        // Create the businesses + employees rows in one transaction.
+        // The RPC validates the domain match server-side too.
+        const { data: rpcRows, error: rpcErr } = await supabaseService.client
+            .rpc('onboard_business', {
+                p_business_name: businessName,
+                p_email_domain:  normalizedDomain,
+                p_admin_email:   normalizedEmail,
+                p_admin_name:    null,
+                p_admin_role:    null,
+                p_admin_mobile:  null,
+            });
+        if (rpcErr) {
+            // 23505 = unique violation on businesses.email_domain — race lost.
+            if (rpcErr.code === '23505' || /already exists|duplicate/i.test(rpcErr.message)) {
+                return res.status(409).json({ error: 'DOMAIN_ALREADY_REGISTERED' });
+            }
+            return res.status(500).json({ error: rpcErr.message });
+        }
+        const row = Array.isArray(rpcRows) ? rpcRows[0] : rpcRows;
+
+        // Invalidate the tenant cache so subsequent authed calls pick up the
+        // newly-created employees row instead of seeing the cached "orphan".
+        // Only relevant on the authed path — on the anonymous path the auth
+        // user is brand-new and can't be in the cache.
+        if (authedUserId) _tenantCache.delete(authedUserId);
+
+        res.status(201).json({
+            success: true,
+            needsConfirmation,
+            businessId: row?.business_id || null,
+            employeeId: row?.employee_id || null,
+        });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Public — submit a join request. The admin gets an email with an approve
+// link. If no business owns this domain, return 404 NO_BUSINESS_FOR_DOMAIN
+// so the UI can suggest the Onboard flow instead.
+app.post('/api/onboarding/join-request', async (req, res) => {
+    if (!_rateLimit(req, res, 10)) return;
+    const { email } = req.body || {};
+    const normalizedEmail = String(email || '').toLowerCase().trim();
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+        return res.status(400).json({ error: 'A valid email is required.' });
+    }
+    const domain = _domainFromEmail(normalizedEmail);
+    if (_isPersonalDomain(domain)) {
+        return res.status(400).json({ error: 'Personal email domains are not allowed — use your work email.' });
+    }
+    try {
+        const { data: business, error: lookupErr } = await supabaseService.client
+            .from('businesses')
+            .select('id, name, admin_employee_id')
+            .eq('email_domain', domain)
+            .maybeSingle();
+        if (lookupErr) throw lookupErr;
+        if (!business) {
+            return res.status(404).json({ error: 'NO_BUSINESS_FOR_DOMAIN', domain });
+        }
+
+        // Upsert into join_requests. Only one pending row per (business, email)
+        // is allowed by the partial unique index. ON CONFLICT DO NOTHING +
+        // re-select handles the "user clicked twice" case gracefully.
+        const { data: inserted, error: insErr } = await supabaseService.client
+            .from('join_requests')
+            .insert({ business_id: business.id, email: normalizedEmail })
+            .select('id, token')
+            .maybeSingle();
+
+        let row = inserted;
+        if (insErr && insErr.code === '23505') {
+            const { data: existing } = await supabaseService.client
+                .from('join_requests')
+                .select('id, token')
+                .eq('business_id', business.id)
+                .eq('email', normalizedEmail)
+                .eq('status', 'pending')
+                .maybeSingle();
+            row = existing;
+        } else if (insErr) {
+            throw insErr;
+        }
+
+        if (!row) {
+            return res.status(500).json({ error: 'Could not record the join request.' });
+        }
+
+        // Email the admin. Failures are logged but don't roll back the row —
+        // the admin can still see the request in the dashboard, and the
+        // requester can re-submit which is a no-op upsert.
+        if (business.admin_employee_id) {
+            const { data: admin } = await supabaseService.client
+                .from('employees')
+                .select('emailId')
+                .eq('id', business.admin_employee_id)
+                .maybeSingle();
+            if (admin?.emailId) {
+                const mailer = require('./core/mailer');
+                mailer.sendAdminJoinRequestEmail({
+                    to: admin.emailId,
+                    businessName:   business.name,
+                    requesterEmail: normalizedEmail,
+                    joinRequestId:  row.id,
+                    token:          row.token,
+                }).catch(err => console.error('join-request email send failed:', err.message));
+            }
+        }
+
+        res.status(201).json({ success: true, businessName: business.name });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+function _approvalPageHtml(title, body) {
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title>
+        <style>body{font-family:system-ui,sans-serif;background:#f8fafc;color:#0f172a;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+        .card{background:#fff;padding:40px;border-radius:16px;box-shadow:0 10px 30px rgba(15,23,42,.08);max-width:480px;text-align:center}
+        h1{margin:0 0 12px;font-size:20px}p{color:#475569;line-height:1.5}</style></head>
+        <body><div class="card">${body}</div></body></html>`;
+}
+
+// Token-gated approve link, clicked from the admin's email. Idempotent:
+// re-clicking shows "already approved" rather than re-issuing an invitation.
+app.get('/api/join-requests/:id/approve', async (req, res) => {
+    const id = Number(req.params.id);
+    const token = String(req.query.token || '');
+    if (!id || !token) return res.status(400).send(_approvalPageHtml('Invalid link', '<h1>Invalid link</h1><p>This approval link is malformed.</p>'));
+    try {
+        const { data: jr, error } = await supabaseService.client
+            .from('join_requests')
+            .select('id, business_id, email, status, token')
+            .eq('id', id)
+            .maybeSingle();
+        if (error) throw error;
+        if (!jr || jr.token !== token) {
+            return res.status(404).send(_approvalPageHtml('Not found', '<h1>Not found</h1><p>This approval link is not valid.</p>'));
+        }
+        if (jr.status !== 'pending') {
+            return res.status(200).send(_approvalPageHtml('Already handled', `<h1>Already ${jr.status}</h1><p>This request was already ${jr.status}.</p>`));
+        }
+
+        // Mark approved, create the invitation, notify the requester.
+        await supabaseService.client.from('join_requests')
+            .update({ status: 'approved', decided_at: new Date().toISOString() })
+            .eq('id', id);
+
+        await supabaseService.client.from('employee_invitations').upsert({
+            business_id: jr.business_id,
+            email:       jr.email,
+            role:        'member',
+            is_admin:    false,
+            status:      'pending',
+            invited_by:  null,
+        }, { onConflict: 'business_id,email' });
+
+        const { data: business } = await supabaseService.client
+            .from('businesses')
+            .select('name').eq('id', jr.business_id).maybeSingle();
+
+        const mailer = require('./core/mailer');
+        mailer.sendApprovedNoticeEmail({
+            to: jr.email,
+            businessName: business?.name || 'your team',
+        }).catch(err => console.error('approval-notice email failed:', err.message));
+
+        res.send(_approvalPageHtml('Approved', `<h1>Approved ✓</h1><p>${jr.email} can now finish signing up.</p>`));
+    } catch (err) {
+        res.status(500).send(_approvalPageHtml('Error', `<h1>Something went wrong</h1><p>${err.message}</p>`));
+    }
+});
+
+// Token-gated reject — matches the second button in the admin's email.
+app.get('/api/join-requests/:id/reject', async (req, res) => {
+    const id = Number(req.params.id);
+    const token = String(req.query.token || '');
+    if (!id || !token) return res.status(400).send(_approvalPageHtml('Invalid link', '<h1>Invalid link</h1>'));
+    try {
+        const { data: jr } = await supabaseService.client
+            .from('join_requests')
+            .select('id, status, token, email')
+            .eq('id', id).maybeSingle();
+        if (!jr || jr.token !== token) {
+            return res.status(404).send(_approvalPageHtml('Not found', '<h1>Not found</h1>'));
+        }
+        if (jr.status === 'pending') {
+            await supabaseService.client.from('join_requests')
+                .update({ status: 'rejected', decided_at: new Date().toISOString() })
+                .eq('id', id);
+        }
+        res.send(_approvalPageHtml('Rejected', `<h1>Rejected</h1><p>${jr.email} will not be added.</p>`));
+    } catch (err) {
+        res.status(500).send(_approvalPageHtml('Error', `<h1>Something went wrong</h1><p>${err.message}</p>`));
+    }
+});
+
+// Admin-only — list pending requests for the caller's tenant.
+app.get('/api/join-requests', requireTenantAuth, async (req, res) => {
+    if (!req.employee.is_admin) return res.status(403).json({ error: 'Admin only' });
+    const { data, error } = await supabaseService.client
+        .from('join_requests')
+        .select('id, email, status, requested_at, decided_at')
+        .eq('business_id', req.business_id)
+        .eq('status', 'pending')
+        .order('requested_at', { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data || []);
 });
 
 // Auth Endpoints
@@ -226,7 +549,12 @@ app.post('/api/auth/login', async (req, res) => {
         res.json({
             user: { id: data.user.id, email: data.user.email },
             session: data.session,
-            employee: employee || null
+            employee: employee || null,
+            // 'orphan' = Supabase Auth user exists but no employees row scoped
+            // to a business. The UI uses this to render PostLoginChooser
+            // (Onboard your business / Request to join) instead of trying
+            // to load the dashboard.
+            accountStatus: (employee && employee.business_id) ? 'active' : 'orphan',
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -289,11 +617,18 @@ app.get('/api/auth/me', async (req, res) => {
         const { data: { user }, error } = await supabaseService.client.auth.getUser(token);
         if (error || !user) return res.status(401).json({ error: 'Invalid or expired token' });
         const employee = await supabaseService.getEmployeeByEmail(user.email);
-        const businessClient = require('./core/businessClient');
-        const onboarding = await businessClient.getOnboardingStatus();
+        const accountStatus = (employee && employee.business_id) ? 'active' : 'orphan';
+        // Skip the onboarding-status round-trip for orphans — they're going
+        // to PostLoginChooser, not the wizard, so the counts don't matter.
+        let onboarding = null;
+        if (accountStatus === 'active') {
+            const businessClient = require('./core/businessClient');
+            onboarding = await businessClient.getOnboardingStatus(employee.business_id);
+        }
         res.json({
             user: { id: user.id, email: user.email },
             employee: employee || null,
+            accountStatus,
             onboarding,
         });
     } catch (err) {
